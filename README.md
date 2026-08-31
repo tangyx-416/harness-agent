@@ -1,33 +1,40 @@
 # Harness Project Agent
 
-**Version: 0.1.1**  
-**Status: Frozen Baseline / Runnable Single-Agent MVP**
+**Version: 0.2.0** | **Status: Repository Understanding MVP / Read-Only**
 
 A Single-Agent MVP built on the Strands Agents SDK, designed to help analyze and understand code repositories through natural language interaction.
 
 ## Overview
 
-This project implements a conversational AI agent that can inspect and analyze project structures. It serves as a foundation for building more advanced repository management and development assistance tools.
+This project implements a conversational AI agent that can safely browse, read, search, and understand a code repository. It serves as a foundation for building more advanced repository management and development assistance tools.
 
 ## Architecture
 
 ```text
-User Input
-    ↓
+User
+ ↓
 Agent Harness (Strands)
-    ├─ OpenAI Model
-    ├─ System Prompt
-    └─ Tools
-        └─ inspect_project
-            ↓
-    Project Analysis
+ ├─ OpenAI Model
+ ├─ System Prompt (Repository Understanding)
+ └─ Repository Tools
+     ├─ inspect_project
+     ├─ list_directory
+     ├─ read_file
+     ├─ search_code
+     └─ analyze_dependencies
+ ↓
+Repository (READ ONLY)
+ ↓
+Agent reasoning
+ ↓
+Answer
 ```
 
 The agent uses a simple but extensible architecture:
 - **Agent Harness**: Strands Agents SDK manages the agent loop, tool calling, and conversation flow
 - **Model**: OpenAI-compatible language model for understanding and generation
-- **Tools**: Python functions decorated with `@tool` that the agent can call
-- **System Prompt**: Defines the agent's behavior and guidelines
+- **Repository Tools**: Read-only Python functions; every path is confined to the repository root via a shared safety module (`path_utils`)
+- **System Prompt**: Defines the agent's behavior, tool strategy, and anti-hallucination rules
 
 ## Requirements
 
@@ -113,13 +120,17 @@ python scripts/run_agent.py
 Example interaction:
 ```text
 ============================================================
-Harness Agent v0.1
+Harness Agent v0.2
 Type 'exit' or 'quit' to stop, Ctrl+C to interrupt.
 ============================================================
 
-You > What's the structure of this project?
+You > Where is the Agent initialized?
 
-Agent > [analyzes and responds]
+Agent > [searches create_agent, reads agent.py, answers with file:line refs]
+
+You > What dependencies does this repository use?
+
+Agent > [calls analyze_dependencies and summarizes manifests]
 
 You > exit
 Goodbye!
@@ -145,19 +156,23 @@ Run with coverage:
 pytest --cov=harness_agent
 ```
 
-## Current Features (v0.1.1)
+## Current Features (v0.2.0)
 
-✅ **Single Agent**: One conversational agent with clear responsibilities  
-✅ **OpenAI-Compatible Models**: Works with OpenAI, local vLLM, and other compatible endpoints  
-✅ **System Prompt**: Configurable agent behavior through markdown prompt files  
-✅ **Project Inspection Tool**: Read-only analysis of repository structure  
-✅ **CLI Interface**: Interactive terminal-based conversation  
-✅ **Configuration Management**: Environment-based config with validation  
-✅ **Deterministic Tests**: 27 passing tests with mocked dependencies  
+- ✅ **Single Strands Agent**: One conversational agent with clear responsibilities
+- ✅ **OpenAI-Compatible Models**: Works with OpenAI, local vLLM, and other compatible endpoints
+- ✅ **Project Inspection**: Top-level repository overview (`inspect_project`)
+- ✅ **Directory Browsing**: Recursive, depth-limited listing (`list_directory`)
+- ✅ **Safe File Reading**: Line-numbered reads with line ranges (`read_file`)
+- ✅ **Repository Code Search**: Pure-Python substring/regex search (`search_code`)
+- ✅ **Dependency Analysis**: pyproject.toml / requirements*.txt / package.json (`analyze_dependencies`)
+- ✅ **Read-Only Repository Boundary**: Path confinement, sensitive file blocking, binary detection, output limits
+- ✅ **CLI Interface**: Interactive terminal-based conversation
+- ✅ **Configuration Management**: Environment-based config with validation
+- ✅ **Deterministic Tests**: 94 passing tests with mocked dependencies
 
 ### Verification Status
 
-- **Tests**: 27/27 deterministic/mock tests passing
+- **Tests**: 94/94 deterministic/mock tests passing
 - **SDK Integration**: Verified locally with Strands Agents 1.52.0
 - **Real LLM Execution**: Requires a valid OpenAI API key
 - **Live API Smoke Test**: Has not yet been performed in this environment
@@ -166,10 +181,13 @@ This is a **stable development baseline**, not a production-ready system.
 
 ### Safety Features
 
-- **Read-only by default**: Current tools only inspect, never modify
-- **Sensitive file filtering**: Automatically excludes `.env`, credentials, keys, etc.
+- **Read-only by default**: All repository tools inspect, never modify
+- **Repository-root confinement**: Resolved paths can never escape the project root
+- **Sensitive file filtering**: `.env`, keys, credentials are blocked; `.env.example` is allowed
+- **Ignored directories**: `.git`, `.venv`, `__pycache__`, `node_modules`, `dist`, `build` are never touched
+- **Binary detection**: By extension and content sniffing
+- **Output limits**: Depth/entry/line/result caps with `truncated` flags
 - **No arbitrary execution**: Tools are explicitly defined, no shell access
-- **Error handling**: Graceful degradation on failures
 
 ## Project Structure
 
@@ -178,30 +196,36 @@ Harness Agent/
 ├── src/
 │   └── harness_agent/
 │       ├── __init__.py
-│       ├── agent.py           # Agent factory and initialization
-│       ├── config.py           # Configuration management
+│       ├── agent.py                    # Agent factory and initialization
+│       ├── config.py                   # Configuration management
 │       ├── prompts/
-│       │   └── system.md       # System prompt definition
+│       │   └── system.md               # Repository Understanding prompt
 │       └── tools/
 │           ├── __init__.py
-│           └── project_tools.py  # Project inspection tools
+│           ├── path_utils.py           # Shared path-safety module
+│           ├── project_tools.py        # inspect_project
+│           └── repository_tools.py     # list_directory / read_file / search_code / analyze_dependencies
 ├── scripts/
-│   └── run_agent.py           # CLI entry point
+│   ├── run_agent.py                    # CLI entry point
+│   └── smoke_repo_tools.py             # Manual tool/security smoke script
 ├── tests/
-│   ├── test_config.py         # Configuration tests
-│   └── test_tools.py          # Tool tests
-├── .env.example               # Example environment configuration
-├── .gitignore                 # Git ignore patterns
-├── pyproject.toml             # Project metadata and dependencies
-├── README.md                  # This file
-└── LICENSE                    # MIT License
+│   ├── test_agent_factory.py           # Agent factory + tool registration tests
+│   ├── test_cli.py                     # CLI tests
+│   ├── test_config.py                  # Configuration tests
+│   ├── test_repository_tools.py        # Repository tool tests
+│   └── test_tools.py                   # inspect_project tests
+├── .env.example                        # Example environment configuration
+├── .gitignore                          # Git ignore patterns
+├── pyproject.toml                      # Project metadata and dependencies
+├── README.md                           # This file
+├── CHANGELOG.md                        # Version history
+└── LICENSE                             # MIT License
 ```
 
 ## Roadmap
 
-This is v0.1.1 - a minimal viable foundation. Future versions will add:
+v0.2.0 delivered the Repository Understanding layer. Future versions will add:
 
-- **v0.2**: File reading tools (read source code, configuration files)
 - **v0.3**: Safe shell execution tools (with user confirmation)
 - **v0.4**: Git integration tools (status, diff, log)
 - **v0.5**: Memory system (conversation history, learned facts)
@@ -211,13 +235,15 @@ This is v0.1.1 - a minimal viable foundation. Future versions will add:
 
 ## Development Status
 
-**v0.1.1 is the frozen baseline.**
+**v0.2.0 is the current development baseline.**
 
 ### Implemented
 
 - Single Strands Agent
 - OpenAI-compatible model provider
 - Project inspection tool (read-only)
+- Directory browsing, safe file reading, code search, dependency analysis
+- Shared repository path-safety module
 - Read-only safety boundary
 - CLI interface
 - Environment configuration
@@ -225,10 +251,8 @@ This is v0.1.1 - a minimal viable foundation. Future versions will add:
 
 ### Not Implemented
 
-- File reading/writing
-- Code search
+- File writing/modification
 - Shell execution
-- File modification
 - Git operations
 - Memory system
 - Planning capabilities
@@ -251,9 +275,14 @@ Test the following interactions:
    You > What tools do you have?
    ```
 
-2. **Project inspection**:
+2. **Repository understanding**:
    ```
-   You > Inspect this project and summarize its top-level structure.
+   You > Find where create_agent is implemented and explain how the Agent is configured.
+   ```
+
+3. **Dependency analysis**:
+   ```
+   You > What dependencies does this project use?
    ```
 
 **Note**: This is not part of the automated test suite as it requires a real API key and incurs API costs. All automated tests use mocked dependencies.
@@ -315,6 +344,4 @@ This is a personal learning and development project. Feel free to fork and adapt
 
 ---
 
-**Version**: 0.1.0  
-**Status**: Active Development  
-**Python**: 3.10+
+**Version**: 0.2.0 | **Status**: Active Development (Read-Only Repository Understanding) | **Python**: 3.10+

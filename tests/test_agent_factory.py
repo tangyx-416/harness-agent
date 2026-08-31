@@ -133,6 +133,33 @@ def test_create_agent_registers_tools():
             assert len(call_kwargs["system_prompt"]) > 0
 
 
+def test_create_agent_registers_all_v02_tools():
+    """v0.2.0: all five repository tools must be registered (no real API)."""
+    config = AgentConfig(api_key="test-key", model_id="gpt-4", base_url=None)
+
+    with patch("harness_agent.agent.OpenAIModel"), patch(
+        "harness_agent.agent.Agent"
+    ) as mock_agent_class:
+        mock_agent_class.return_value = Mock()
+
+        create_agent(config)
+
+        tools = mock_agent_class.call_args.kwargs["tools"]
+        tool_names = {
+            getattr(t, "tool_name", getattr(t, "__name__", "")) for t in tools
+        }
+
+        expected = {
+            "inspect_project",
+            "list_directory",
+            "read_file",
+            "search_code",
+            "analyze_dependencies",
+        }
+        assert expected <= tool_names, f"missing tools: {expected - tool_names}"
+        assert len(tools) == 5
+
+
 def test_create_agent_with_missing_api_key():
     """Test that agent creation fails with missing API key."""
     with patch.dict(os.environ, {}, clear=True):

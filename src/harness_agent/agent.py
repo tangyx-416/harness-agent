@@ -8,6 +8,12 @@ from strands.models.openai import OpenAIModel
 
 from .config import AgentConfig, get_prompts_dir
 from .tools.project_tools import inspect_project
+from .tools.repository_tools import (
+    analyze_dependencies,
+    list_directory,
+    read_file,
+    search_code,
+)
 
 
 def load_system_prompt() -> str:
@@ -65,8 +71,10 @@ def create_agent(config: AgentConfig | None = None) -> Agent:
     # Load system prompt
     system_prompt = load_system_prompt()
 
-    # Create tool - Strands @tool decorator makes functions into tools
-    @tool
+    # Create tool - Strands @tool decorator makes functions into tools.
+    # The public model-facing name is 'inspect_project' (matches docs and
+    # the other repository tools); the Python wrapper keeps a distinct name.
+    @tool(name="inspect_project")
     def inspect_project_tool(directory: str = ".") -> dict[str, Any]:
         """Inspect the current project structure and return basic information.
 
@@ -86,7 +94,13 @@ def create_agent(config: AgentConfig | None = None) -> Agent:
     agent = Agent(
         model=model,
         system_prompt=system_prompt,
-        tools=[inspect_project_tool],
+        tools=[
+            inspect_project_tool,
+            list_directory,
+            read_file,
+            search_code,
+            analyze_dependencies,
+        ],
         name="HarnessAgent",
         description="A project repository assistant agent",
     )
