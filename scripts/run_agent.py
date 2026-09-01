@@ -3,6 +3,11 @@
 
 This script provides an interactive terminal interface for communicating
 with the Harness Agent.
+
+v0.3.0: after every agent turn, any pending execution plans prepared by
+the agent are shown to the user with an explicit approval prompt. The
+CLI is the trusted host layer -- the model can never approve or execute
+commands on its own.
 """
 
 import sys
@@ -13,15 +18,109 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from harness_agent.agent import create_agent
 from harness_agent.config import AgentConfig
+from harness_agent.execution import (
+    ExecutionBroker,
+    execute_approved,
+    get_default_broker,
+)
+
+#: Input lines that count as explicit approval. Everything else -- empty
+#: input (Enter), 'n', 'no', random strings -- is a NO. There is no flag
+#: or environment variable that bypasses this prompt.
+_APPROVAL_WORDS = frozenset({"y", "yes"})
+
+#: How much captured output is echoed after an execution.
+_RESULT_ECHO_CHARS = 2000
 
 
 def print_banner():
     """Print welcome banner."""
     print("=" * 60)
-    print("Harness Agent v0.1")
+    print("Harness Agent v0.3")
     print("Type 'exit' or 'quit' to stop, Ctrl+C to interrupt.")
     print("=" * 60)
     print()
+
+
+def show_approval_request(plan) -> None:
+    """Render the approval block for one pending execution plan."""
+    print("-" * 60)
+    print("Execution approval required")
+    print()
+    print("Command:")
+    print(f"  {plan.display_command}")
+    print()
+    print("Working directory:")
+    print(f"  {plan.cwd}")
+    print()
+    print(f"Risk ({plan.risk_level}):")
+    print(f"  {plan.risk_reason}")
+    print()
+    print("Note:")
+    print("  Execution runs with your current OS-user privileges.")
+    print("  This is not an OS-level sandbox.")
+    print()
+    print("Timeout:")
+    print(f"  {plan.timeout_seconds} seconds")
+    print()
+
+
+def request_approval(plan) -> bool:
+    """Ask the user to approve one plan. Only explicit y/yes approves."""
+    show_approval_request(plan)
+    try:
+        answer = input("Approve? [y/N]: ")
+    except (KeyboardInterrupt, EOFError):
+        print("\n(Cancelled)")
+        return False
+    return answer.strip().lower() in _APPROVAL_WORDS
+
+
+def _echo_result(result) -> None:
+    """Print a compact summary of an ExecutionResult."""
+    print("-" * 60)
+    status = "timed out" if result.timed_out else f"exit code {result.exit_code}"
+    print(
+        f"Execution finished: {result.command} -> {status} "
+        f"({result.duration_ms} ms)"
+    )
+    if result.stdout_truncated:
+        print(f"[stdout truncated to {len(result.stdout)} characters]")
+    if result.stderr_truncated:
+        print(f"[stderr truncated to {len(result.stderr)} characters]")
+
+    for stream_name, text in (("stdout", result.stdout), ("stderr", result.stderr)):
+        body = text.strip()
+        if not body:
+            continue
+        print(f"{stream_name}:")
+        if len(body) > _RESULT_ECHO_CHARS:
+            body = body[-_RESULT_ECHO_CHARS:]
+            print(f"{body}\n[... tail only, {stream_name} was truncated ...]")
+        else:
+            print(body)
+    print("-" * 60)
+
+
+def process_pending_executions(broker: ExecutionBroker | None = None) -> None:
+    """Show pending plans to the user and run the approved ones.
+
+    This is the trusted host layer: approval decisions are made here by
+    the human user, never by the model.
+    """
+    broker = broker if broker is not None else get_default_broker()
+    for plan in broker.pending():
+        if not request_approval(plan):
+            broker.reject(plan.id)
+            print("Execution cancelled: nothing was run.\n")
+            continue
+        try:
+            broker.approve(plan.id)
+            result = execute_approved(broker, plan.id)
+        except Exception as exc:  # broker/service guard; never crash the CLI
+            print(f"Execution error: {exc}\n")
+            continue
+        _echo_result(result)
 
 
 def main():
@@ -62,6 +161,10 @@ def main():
 
                 # AgentResult has __str__ that returns the final text response
                 print(f"\nAgent > {str(result)}\n")
+
+                # v0.3.0: the agent may have prepared execution plans.
+                # The user approves/rejects them here, in the host layer.
+                process_pending_executions()
 
             except KeyboardInterrupt:
                 print("\n\n(Interrupted)")

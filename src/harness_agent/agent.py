@@ -7,6 +7,7 @@ from strands import Agent, tool
 from strands.models.openai import OpenAIModel
 
 from .config import AgentConfig, get_prompts_dir
+from .tools.execution_tools import get_execution_result, prepare_command
 from .tools.project_tools import inspect_project
 from .tools.repository_tools import (
     analyze_dependencies,
@@ -74,15 +75,19 @@ def create_agent(config: AgentConfig | None = None) -> Agent:
     # Create tool - Strands @tool decorator makes functions into tools.
     # The public model-facing name is 'inspect_project' (matches docs and
     # the other repository tools); the Python wrapper keeps a distinct name.
+    # v0.3.0: inspect_project now enforces repository-root confinement via
+    # path_utils, identical to the other repository tools.
     @tool(name="inspect_project")
     def inspect_project_tool(directory: str = ".") -> dict[str, Any]:
-        """Inspect the current project structure and return basic information.
+        """Inspect a directory inside the repository and return basic information.
 
         This tool analyzes the project directory structure, checks for common
-        project files, and provides an overview of the repository.
+        project files, and provides an overview of the repository. Requests
+        outside the repository root are refused.
 
         Args:
-            directory: Directory to inspect (default: current directory)
+            directory: Directory to inspect relative to the repository root
+                (default: repository root)
 
         Returns:
             Dictionary containing project information including working directory,
@@ -91,6 +96,9 @@ def create_agent(config: AgentConfig | None = None) -> Agent:
         return inspect_project(directory)
 
     # Create agent
+    # v0.3.0: prepare_command / get_execution_result are the only execution
+    # related tools exposed to the model. They can never run anything;
+    # approval and subprocess execution stay in the trusted host layer.
     agent = Agent(
         model=model,
         system_prompt=system_prompt,
@@ -100,6 +108,8 @@ def create_agent(config: AgentConfig | None = None) -> Agent:
             read_file,
             search_code,
             analyze_dependencies,
+            prepare_command,
+            get_execution_result,
         ],
         name="HarnessAgent",
         description="A project repository assistant agent",

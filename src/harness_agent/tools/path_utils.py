@@ -164,6 +164,10 @@ def path_is_dangerous(path: Path, root: Path, *, target_is_dir: bool) -> bool:
     except ValueError:
         return True
 
+    if not rel_parts:
+        # The path IS the repository root itself -- always safe.
+        return False
+
     if target_is_dir:
         for part in rel_parts:
             if is_ignored_dir_name(part) or is_sensitive_dir_name(part):

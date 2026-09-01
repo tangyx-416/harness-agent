@@ -1,4 +1,9 @@
-"""Tests for project inspection tools."""
+"""Tests for project inspection tools.
+
+v0.3.0: inspect_project enforces repository-root confinement. Tests pass
+an explicit ``root`` so isolated temporary directories act as the
+repository boundary; requests escaping the root must be refused.
+"""
 
 import tempfile
 from pathlib import Path
@@ -9,8 +14,8 @@ from harness_agent.tools.project_tools import inspect_project
 
 
 def test_inspect_project_nonexistent_directory():
-    """Test inspection of a non-existent directory."""
-    result = inspect_project("/nonexistent/path/12345")
+    """Non-existent paths inside the repository report exists=False."""
+    result = inspect_project("no_such_dir_12345")
 
     assert result["exists"] is False
     assert "error" in result
@@ -20,7 +25,8 @@ def test_inspect_project_nonexistent_directory():
 def test_inspect_project_empty_directory():
     """Test inspection of an empty directory."""
     with tempfile.TemporaryDirectory() as tmpdir:
-        result = inspect_project(tmpdir)
+        tmppath = Path(tmpdir)
+        result = inspect_project(tmpdir, root=tmppath)
 
         assert result["exists"] is True
         assert result["working_directory"] == str(Path(tmpdir).resolve())
@@ -49,7 +55,7 @@ def test_inspect_project_with_common_files():
         (tmppath / "tests").mkdir()
         (tmppath / "docs").mkdir()
 
-        result = inspect_project(tmpdir)
+        result = inspect_project(tmpdir, root=tmppath)
 
         assert result["exists"] is True
         assert result["is_git_repo"] is True
@@ -85,7 +91,7 @@ def test_inspect_project_identifies_main_directories():
         (tmppath / "docs").mkdir()
         (tmppath / ".hidden").mkdir()
 
-        result = inspect_project(tmpdir)
+        result = inspect_project(tmpdir, root=tmppath)
 
         main_dirs = result["main_directories"]
         assert "src" in main_dirs
@@ -112,7 +118,7 @@ def test_inspect_project_filters_sensitive_files():
         (tmppath / "README.md").touch()
         (tmppath / "config.yaml").touch()
 
-        result = inspect_project(tmpdir)
+        result = inspect_project(tmpdir, root=tmppath)
 
         items = result["top_level_items"]
 
@@ -145,17 +151,76 @@ def test_inspect_project_various_readme_formats():
 
         # Test README.md
         (tmppath / "README.md").touch()
-        result = inspect_project(tmpdir)
+        result = inspect_project(tmpdir, root=tmppath)
         assert result["has_readme"] is True
 
         # Clean up and test README.rst
         (tmppath / "README.md").unlink()
         (tmppath / "README.rst").touch()
-        result = inspect_project(tmpdir)
+        result = inspect_project(tmpdir, root=tmppath)
         assert result["has_readme"] is True
 
         # Clean up and test plain README
         (tmppath / "README.rst").unlink()
         (tmppath / "README").touch()
-        result = inspect_project(tmpdir)
+        result = inspect_project(tmpdir, root=tmppath)
         assert result["has_readme"] is True
+
+
+# ---------------------------------------------------------------------------
+# v0.3.0 regression: repository-root confinement
+# ---------------------------------------------------------------------------
+
+
+def test_inspect_project_blocks_parent_escape(tmp_path):
+    (tmp_path / ".git").mkdir()
+    (tmp_path / "src").mkdir()
+
+    for bad in ("../", "../../", ".."):
+        result = inspect_project(bad, root=tmp_path)
+        assert result["exists"] is False, bad
+        assert result["denied"] is True, bad
+        assert "escapes repository root" in result["error"], bad
+
+
+def test_inspect_project_blocks_absolute_external(tmp_path):
+    (tmp_path / ".git").mkdir()
+
+    external = tmp_path.parent / "external_inspect_target"
+    external.mkdir(exist_ok=True)
+
+    for bad in (str(external), "/etc", "C:\\Users"):
+        result = inspect_project(bad, root=tmp_path)
+        assert result["exists"] is False, bad
+        assert result["denied"] is True, bad
+
+
+def test_inspect_project_blocks_ignored_directory(tmp_path):
+    (tmp_path / ".git").mkdir()
+    (tmp_path / ".venv").mkdir()
+    (tmp_path / ".venv" / "pyvenv.cfg").touch()
+
+    result = inspect_project(".venv", root=tmp_path)
+    assert result["exists"] is False
+    assert result["denied"] is True
+
+
+def test_inspect_project_allows_repo_subdirectory(tmp_path):
+    (tmp_path / ".git").mkdir()
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "harness_agent").mkdir()
+
+    result = inspect_project("src", root=tmp_path)
+    assert result["exists"] is True
+    assert "denied" not in result
+    assert "harness_agent/" in result["top_level_items"]
+    # We are inspecting inside src, so its source-like children are listed.
+    assert "harness_agent" in result["main_directories"]
+
+
+def test_inspect_project_denial_has_no_listing(tmp_path):
+    """Denied requests must not leak directory content."""
+    (tmp_path / ".git").mkdir()
+    result = inspect_project("../../", root=tmp_path)
+    assert "top_level_items" not in result
+    assert "main_directories" not in result

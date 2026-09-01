@@ -1,40 +1,46 @@
 # Harness Project Agent
 
-**Version: 0.2.0** | **Status: Repository Understanding MVP / Read-Only**
+**Version: 0.3.0** | **Status: User-Approved Constrained Execution**
 
-A Single-Agent MVP built on the Strands Agents SDK, designed to help analyze and understand code repositories through natural language interaction.
+A Single-Agent MVP built on the Strands Agents SDK, designed to help analyze and understand code repositories through natural language interaction, and to request (never perform) whitelisted command execution under explicit human approval.
 
 ## Overview
 
-This project implements a conversational AI agent that can safely browse, read, search, and understand a code repository. It serves as a foundation for building more advanced repository management and development assistance tools.
+This project implements a conversational AI agent that can safely browse, read, search, and understand a code repository. In v0.3.0 the agent gained the ability to *request* controlled execution of a tiny development-command allowlist. The core security model is:
+
+> LLM proposes. Policy validates. User approves. Host executes.
 
 ## Architecture
 
 ```text
 User
  ↓
-Agent Harness (Strands)
- ├─ OpenAI Model
- ├─ System Prompt (Repository Understanding)
- └─ Repository Tools
-     ├─ inspect_project
-     ├─ list_directory
-     ├─ read_file
-     ├─ search_code
-     └─ analyze_dependencies
- ↓
-Repository (READ ONLY)
- ↓
-Agent reasoning
- ↓
-Answer
+Strands Agent
+ ├── Repository Understanding Tools
+ │    ├── inspect_project
+ │    ├── list_directory
+ │    ├── read_file
+ │    ├── search_code
+ │    └── analyze_dependencies
+ └── prepare_command
+      ↓
+ Execution Policy (strict allowlist)
+      ↓
+ Pending Execution Plan
+      ↓
+ User Approval (CLI prompt)          ← trust boundary
+      ↓
+ Host Execution Service (shell=False)
+      ↓
+ Execution Result
 ```
 
 The agent uses a simple but extensible architecture:
 - **Agent Harness**: Strands Agents SDK manages the agent loop, tool calling, and conversation flow
 - **Model**: OpenAI-compatible language model for understanding and generation
 - **Repository Tools**: Read-only Python functions; every path is confined to the repository root via a shared safety module (`path_utils`)
-- **System Prompt**: Defines the agent's behavior, tool strategy, and anti-hallucination rules
+- **Execution Layer**: The model can only *prepare* execution plans (`prepare_command`); validation, approval and subprocess execution live in the trusted host layer (`harness_agent.execution` + CLI). Execution is never automatically approved.
+- **System Prompt**: Defines the agent's behavior, tool strategy, execution state semantics, and anti-hallucination rules
 
 ## Requirements
 
@@ -120,7 +126,7 @@ python scripts/run_agent.py
 Example interaction:
 ```text
 ============================================================
-Harness Agent v0.2
+Harness Agent v0.3
 Type 'exit' or 'quit' to stop, Ctrl+C to interrupt.
 ============================================================
 
@@ -132,9 +138,75 @@ You > What dependencies does this repository use?
 
 Agent > [calls analyze_dependencies and summarizes manifests]
 
-You > exit
-Goodbye!
+You > Run the tests.
+
+Agent > A test execution has been prepared and requires approval.
+
+------------------------------------------------------------
+Execution approval required
+
+Command:
+  python -m pytest -q
+
+Working directory:
+  E:\Harness Agent
+
+Risk (HIGH):
+  Executes repository Python code with the current operating-system
+  user's privileges.
+
+Timeout:
+  30 seconds
+
+Approve? [y/N]: y
+------------------------------------------------------------
+Execution finished: python -m pytest -q -> exit code 0 (4123 ms)
+------------------------------------------------------------
 ```
+
+Denied example:
+```text
+You > Run pip install requests.
+
+Agent > Denied: package installation is not allowed in v0.3.0.
+        The command allowlist only covers python --version,
+        python -m pytest ... and python -m ruff check ...
+```
+
+## Execution Safety Model
+
+Every execution request passes through these layers:
+
+- **Strict allowlist**: only `python --version`, `python -m pytest [...]` and `python -m ruff check [...]` (bare `pytest`/`ruff` aliases are normalized). Everything else - pip, git, shell binaries, package managers - is denied.
+- **No arbitrary Python**: `-c`, stdin scripts, script paths, `pip` and arbitrary modules are refused; the policy understands Python arguments.
+- **shell=False, argv-based execution**: commands are never passed through a shell; `stdin` is connected to `DEVNULL`. What the user approves (the validated plan) is byte-for-byte what the host executes; `display_command` is a pure rendering and is never parsed.
+- **Shell metacharacter rejection**: `; && || | > <` backticks, `$()` and newlines are refused in every token.
+- **Repository cwd confinement**: the working directory and every path argument must resolve inside the repository root.
+- **Explicit user approval**: only an explicit `y`/`yes` at the CLI prompt executes; Enter, `n`, random input and Ctrl+C all decline. There are no bypass flags. Every pending plan is approved independently - one `yes` never approves anything else.
+- **Secret scrubbing**: API keys, tokens, passwords and credential variables (`OPENAI_API_KEY`, `*_TOKEN`, `*_SECRET`, `*_PASSWORD`, `*_API_KEY`, `*_CREDENTIAL*` ...) never reach the child environment.
+- **Behavior-injection scrubbing**: `PYTHONPATH`, `PYTHONHOME`, `PYTHONSTARTUP`, `PYTHONINSPECT`, `PYTHONUSERBASE`, `PYTEST_ADDOPTS`, `PYTEST_PLUGINS` and `PYTEST_DEBUG` are removed so the environment cannot silently reshape the approved command. Child processes also get `PYTHONDONTWRITEBYTECODE=1`, `PYTHONNOUSERSITE=1` and `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1` (deterministic runs; this repository's own test suite passes with plugin autoload disabled).
+- **Timeout**: 30 seconds by default, clamped to a 60-second maximum. On timeout the directly managed subprocess is killed and any bounded partial output is returned.
+- **Bounded output capture**: reader threads drain stdout/stderr while the child runs; only the first 64 KB per stream is retained and the excess is discarded, so execution output retained in memory is bounded regardless of how much the child prints.
+- **Single-use plans**: each approved plan executes exactly once; prepared-but-rejected plans can never run. Plans only transition `pending → approved → executed` or `pending → rejected`.
+
+Risk levels (`LOW`/`MEDIUM`/`HIGH`) are informational in v0.3.0. All execution still requires explicit approval.
+
+### Note on Strands HITL
+
+Strands Agents 1.53.0 provides native HITL/interruption facilities (`strands.interrupt`, `AgentResult.interrupts`, `HumanInTheLoop`). v0.3.0 deliberately uses host-side approval instead: the Agent-visible tool only prepares an inert execution plan, and the privileged subprocess step lives outside the Agent tool layer - so approving tool calls inside the SDK would not guard the operation that actually needs guarding.
+
+## Important Limitation
+
+This is **not** an OS-level sandbox.
+
+> Commands that execute repository code (e.g. pytest) still run with the
+> current operating-system user's privileges. Repository code could
+> theoretically access files available to the current user, the network,
+> or spawn child processes unless restricted by an external
+> OS/container sandbox. User confirmation is the trust boundary.
+
+Timeout terminates the directly managed subprocess, but v0.3.0 does not
+provide an OS-level guarantee that every descendant process is terminated.
 
 ## Testing
 
@@ -156,24 +228,29 @@ Run with coverage:
 pytest --cov=harness_agent
 ```
 
-## Current Features (v0.2.0)
+## Current Features (v0.3.0)
 
 - ✅ **Single Strands Agent**: One conversational agent with clear responsibilities
 - ✅ **OpenAI-Compatible Models**: Works with OpenAI, local vLLM, and other compatible endpoints
-- ✅ **Project Inspection**: Top-level repository overview (`inspect_project`)
+- ✅ **Project Inspection**: Top-level repository overview (`inspect_project`, root-confined)
 - ✅ **Directory Browsing**: Recursive, depth-limited listing (`list_directory`)
 - ✅ **Safe File Reading**: Line-numbered reads with line ranges (`read_file`)
 - ✅ **Repository Code Search**: Pure-Python substring/regex search (`search_code`)
 - ✅ **Dependency Analysis**: pyproject.toml / requirements*.txt / package.json (`analyze_dependencies`)
+- ✅ **User-Approved Execution**: `prepare_command` requests, policy validates, user approves, host executes
+- ✅ **Execution Policy**: Strict allowlist, per-flag validation, shell-syntax rejection
+- ✅ **Bounded Streaming Capture**: stdout/stderr drained while the child runs; only the first 64 KB per stream is retained (memory-bounded)
 - ✅ **Read-Only Repository Boundary**: Path confinement, sensitive file blocking, binary detection, output limits
-- ✅ **CLI Interface**: Interactive terminal-based conversation
+- ✅ **CLI Interface**: Interactive terminal-based conversation with an execution approval prompt
 - ✅ **Configuration Management**: Environment-based config with validation
-- ✅ **Deterministic Tests**: 94 passing tests with mocked dependencies
+- ✅ **Deterministic Tests**: 222 passing tests with mocked/fake dependencies
 
 ### Verification Status
 
-- **Tests**: 94/94 deterministic/mock tests passing
-- **SDK Integration**: Verified locally with Strands Agents 1.52.0
+- **Tests**: 222/222 deterministic/mock tests passing
+- **SDK Integration**: Verified locally with Strands Agents 1.53.0
+- **Execution Smoke**: `scripts/smoke_execution.py` - 33/33 checks passing (host-level, no API key needed)
+- **Repository Smoke**: `scripts/smoke_repo_tools.py` passing (v0.2 regression)
 - **Real LLM Execution**: Requires a valid OpenAI API key
 - **Live API Smoke Test**: Has not yet been performed in this environment
 
@@ -181,13 +258,14 @@ This is a **stable development baseline**, not a production-ready system.
 
 ### Safety Features
 
-- **Read-only by default**: All repository tools inspect, never modify
-- **Repository-root confinement**: Resolved paths can never escape the project root
+- **Read-only repository tools**: inspection tools never modify anything
+- **Repository-root confinement**: All repository-facing tools (including `inspect_project`) refuse paths outside the project root
 - **Sensitive file filtering**: `.env`, keys, credentials are blocked; `.env.example` is allowed
 - **Ignored directories**: `.git`, `.venv`, `__pycache__`, `node_modules`, `dist`, `build` are never touched
 - **Binary detection**: By extension and content sniffing
 - **Output limits**: Depth/entry/line/result caps with `truncated` flags
-- **No arbitrary execution**: Tools are explicitly defined, no shell access
+- **Constrained execution**: allowlist + approval + argv-based subprocess + timeout + output caps + secret scrubbing
+- **No source mutation**: no write/edit/delete tools, no `ruff --fix`, no patch/apply tools
 
 ## Project Structure
 
@@ -199,19 +277,31 @@ Harness Agent/
 │       ├── agent.py                    # Agent factory and initialization
 │       ├── config.py                   # Configuration management
 │       ├── prompts/
-│       │   └── system.md               # Repository Understanding prompt
+│       │   └── system.md               # System prompt (understanding + execution semantics)
+│       ├── execution/
+│       │   ├── __init__.py             # Package exports + default broker
+│       │   ├── models.py               # ExecutionPlan / ExecutionResult / PolicyDecision
+│       │   ├── policy.py               # Strict allowlist validation
+│       │   ├── broker.py               # Pending plans, single-use lifecycle
+│       │   └── service.py              # Host subprocess service (shell=False)
 │       └── tools/
 │           ├── __init__.py
 │           ├── path_utils.py           # Shared path-safety module
-│           ├── project_tools.py        # inspect_project
-│           └── repository_tools.py     # list_directory / read_file / search_code / analyze_dependencies
+│           ├── project_tools.py        # inspect_project (root-confined)
+│           ├── repository_tools.py     # list_directory / read_file / search_code / analyze_dependencies
+│           └── execution_tools.py      # prepare_command / get_execution_result
 ├── scripts/
-│   ├── run_agent.py                    # CLI entry point
-│   └── smoke_repo_tools.py             # Manual tool/security smoke script
+│   ├── run_agent.py                    # CLI entry point + approval prompt
+│   ├── smoke_repo_tools.py             # Manual tool/security smoke script (v0.2)
+│   └── smoke_execution.py              # Execution/security smoke script (v0.3)
 ├── tests/
 │   ├── test_agent_factory.py           # Agent factory + tool registration tests
 │   ├── test_cli.py                     # CLI tests
+│   ├── test_cli_execution.py           # Approval UX + execution tool tests
 │   ├── test_config.py                  # Configuration tests
+│   ├── test_execution_broker.py        # Plan lifecycle tests
+│   ├── test_execution_policy.py        # Allowlist policy tests
+│   ├── test_execution_service.py       # Host service tests (fake subprocess)
 │   ├── test_repository_tools.py        # Repository tool tests
 │   └── test_tools.py                   # inspect_project tests
 ├── .env.example                        # Example environment configuration
@@ -224,10 +314,9 @@ Harness Agent/
 
 ## Roadmap
 
-v0.2.0 delivered the Repository Understanding layer. Future versions will add:
+v0.2.0 delivered the Repository Understanding layer; v0.3.0 delivered User-Approved Safe Execution. Future versions will add:
 
-- **v0.3**: Safe shell execution tools (with user confirmation)
-- **v0.4**: Git integration tools (status, diff, log)
+- **v0.4**: Git awareness (status, diff, log - read-only)
 - **v0.5**: Memory system (conversation history, learned facts)
 - **v0.6**: Planning capabilities (multi-step task decomposition)
 - **v0.7**: Multi-agent coordination (specialist agents for different tasks)
@@ -235,7 +324,7 @@ v0.2.0 delivered the Repository Understanding layer. Future versions will add:
 
 ## Development Status
 
-**v0.2.0 is the current development baseline.**
+**v0.3.0 is the current development baseline.**
 
 ### Implemented
 
@@ -245,20 +334,23 @@ v0.2.0 delivered the Repository Understanding layer. Future versions will add:
 - Directory browsing, safe file reading, code search, dependency analysis
 - Shared repository path-safety module
 - Read-only safety boundary
-- CLI interface
+- User-approved constrained execution (allowlist + policy + approval + host service)
+- CLI interface with execution approval prompt
 - Environment configuration
-- 27 deterministic tests
+- 222 deterministic tests
 
 ### Not Implemented
 
 - File writing/modification
-- Shell execution
+- Source editing / patch tools
+- Package installation
 - Git operations
+- OS-level sandboxing
 - Memory system
 - Planning capabilities
 - Multi-Agent orchestration
 - Web UI
-- Database persistence
+- Persistent audit log
 
 ## Live Smoke Test
 
@@ -284,6 +376,14 @@ Test the following interactions:
    ```
    You > What dependencies does this project use?
    ```
+
+4. **User-approved execution**:
+   ```
+   You > Run the test suite and tell me whether it passes.
+   ```
+   Expected: the agent prepares `python -m pytest` via `prepare_command`,
+   the CLI shows the approval prompt, and nothing runs until you type
+   `y`. Declining must result in zero subprocess execution.
 
 **Note**: This is not part of the automated test suite as it requires a real API key and incurs API costs. All automated tests use mocked dependencies.
 
@@ -344,4 +444,4 @@ This is a personal learning and development project. Feel free to fork and adapt
 
 ---
 
-**Version**: 0.2.0 | **Status**: Active Development (Read-Only Repository Understanding) | **Python**: 3.10+
+**Version**: 0.3.0 | **Status**: Active Development (User-Approved Constrained Execution) | **Python**: 3.10+

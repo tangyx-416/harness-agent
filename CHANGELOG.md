@@ -5,6 +5,37 @@ All notable changes to the Harness Project Agent will be documented in this file
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - 2026-09-01
+
+### Added
+
+- User-approved command execution (`prepare_command`) - the agent can request, but never run, whitelisted commands
+- Execution policy with a strict allowlist (`python --version`, `python -m pytest ...`, `python -m ruff check ...`) and per-flag argument validation
+- Pending execution plans with immutable `ExecutionPlan` records and single-use lifecycle (`ExecutionBroker`)
+- Explicit CLI approval prompt (only `y`/`yes` approves; Enter, other input and Ctrl+C all decline)
+- Host-only execution service with timeout (30 s default, 60 s max), bounded streaming output capture (64 KB retained per stream, excess drained and discarded - child output can never grow parent memory without bound) and structured `ExecutionResult`
+- Environment policy hardening for child processes: secrets scrubbed plus `PYTHONPATH`/`PYTHONHOME`/`PYTHONSTARTUP`/`PYTHONINSPECT`/`PYTHONUSERBASE`/`PYTEST_ADDOPTS`/`PYTEST_PLUGINS`/`PYTEST_DEBUG` removal and `PYTHONDONTWRITEBYTECODE=1` / `PYTHONNOUSERSITE=1` / `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1` enforcement
+- Environment secret scrubbing for every child process (`OPENAI_API_KEY`, `*_TOKEN`, `*_SECRET`, `*_PASSWORD`, `*_API_KEY`, `*_CREDENTIAL*` ...)
+- Read-only result lookup tool (`get_execution_result`)
+- Execution security/behavior smoke script (`scripts/smoke_execution.py`)
+- Test coverage increased from 94 to 222 deterministic tests
+
+### Security
+
+- No `shell=True`: execution is argv-list based with `shell=False`, `stdin=DEVNULL`
+- Strict command allowlist: pip, git, shell binaries, package managers and arbitrary programs are denied
+- No arbitrary Python execution: `-c`, stdin scripts, script paths, `pip` and arbitrary modules are refused
+- Repository working-directory confinement and path-argument validation (reuses `path_utils`)
+- Shell metacharacters (`; && || | > <` backticks, `$()`, newlines) rejected in every token
+- No automatic approval, no bypass flags (`AUTO_APPROVE`, `--yes`, `--force` do not exist)
+- Execution is never automatically approved; risk levels are informational only
+- Independent per-plan approval: one `yes` never approves other pending plans
+- Explicit broker state machine: only `pending → approved → executed` or `pending → rejected`; rejected/executed plans can never be approved or re-executed
+
+### Fixed
+
+- `inspect_project` now uses the same repository-root confinement policy as the other repository tools
+
 ## [0.2.0] - 2026-08-31
 
 ### Added
