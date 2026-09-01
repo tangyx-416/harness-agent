@@ -1,4 +1,4 @@
-"""Tests for the host-side execution service.
+﻿"""Tests for the host-side execution service.
 
 Two layers of verification:
 
@@ -103,7 +103,7 @@ def fake_popen(monkeypatch):
             return FakePopen(argv, **proc_kwargs, **kwargs)
 
         monkeypatch.setattr(
-            "harness_agent.execution.service.subprocess.Popen", factory
+            "harness_agent.process.subprocess.Popen", factory
         )
         return FakePopen.instances
 
@@ -154,7 +154,8 @@ def test_streams_are_piped_text(tmp_path, fake_popen):
     kwargs = FakePopen.instances[-1].kwargs
     assert kwargs["stdout"] is subprocess.PIPE
     assert kwargs["stderr"] is subprocess.PIPE
-    assert kwargs["text"] is True
+    assert kwargs["encoding"] == "utf-8"
+    assert kwargs["errors"] == "replace"
 
 
 def test_stdout_captured(tmp_path, fake_popen):
@@ -207,7 +208,7 @@ def test_launch_failure_becomes_structured_result(tmp_path, fake_popen, monkeypa
         raise OSError("executable not found")
 
     monkeypatch.setattr(
-        "harness_agent.execution.service.subprocess.Popen", boom
+        "harness_agent.process.subprocess.Popen", boom
     )
     result = execute_plan(make_plan(tmp_path))
     assert result.exit_code is None
@@ -284,6 +285,8 @@ def test_build_child_environment_scrubbing(monkeypatch):
     assert cleaned["PYTHONDONTWRITEBYTECODE"] == "1"
     assert cleaned["PYTHONNOUSERSITE"] == "1"
     assert cleaned["PYTEST_DISABLE_PLUGIN_AUTOLOAD"] == "1"
+    assert cleaned["PYTHONUTF8"] == "1"
+    assert cleaned["PYTHONIOENCODING"] == "utf-8"
 
 
 def test_sensitive_pattern_tables_cover_required_keys():
@@ -427,6 +430,88 @@ def test_real_execution_python_version(tmp_path):
     assert result.timed_out is False
     assert "Python" in result.stdout
     assert "test-super-secret" not in result.stdout + result.stderr
+
+
+# ---------------------------------------------------------------------------
+# v0.4.0 release audit: decoding robustness (invalid UTF-8, child encoding)
+# ---------------------------------------------------------------------------
+
+
+def test_real_invalid_utf8_stdout_replaced_not_crash(tmp_path):
+    """Invalid UTF-8 on stdout becomes replacement chars; result survives."""
+    plan = _stress_plan(
+        tmp_path,
+        "import sys; sys.stdout.buffer.write(b'ok\\xff\\xfe\\x80end')",
+    )
+    result = execute_plan(plan, timeout_seconds=30)
+
+    assert result.exit_code == 0
+    assert result.stdout.startswith("ok")
+    assert result.stdout.endswith("end")
+    assert "\ufffd" in result.stdout  # U+FFFD replacement character
+    assert result.timed_out is False
+
+
+def test_real_invalid_utf8_stderr_replaced_not_crash(tmp_path):
+    plan = _stress_plan(
+        tmp_path,
+        "import sys; sys.stderr.buffer.write(b'bad\\xff\\xfe\\x80tail')",
+    )
+    result = execute_plan(plan, timeout_seconds=30)
+
+    assert result.exit_code == 0
+    assert result.stderr.startswith("bad")
+    assert result.stderr.endswith("tail")
+    assert "\ufffd" in result.stderr
+
+
+def test_real_invalid_utf8_both_streams_no_deadlock(tmp_path):
+    plan = _stress_plan(
+        tmp_path,
+        "import sys\n"
+        "for _ in range(200):\n"
+        "    sys.stdout.buffer.write(b'o\\xff\\xfe')\n"
+        "    sys.stderr.buffer.write(b'e\\x80\\xff')\n"
+        "sys.stdout.flush(); sys.stderr.flush()",
+    )
+    result = execute_plan(plan, timeout_seconds=30)
+
+    assert result.exit_code == 0
+    assert result.timed_out is False  # completed: no pipe deadlock
+    assert "\ufffd" in result.stdout
+    assert "\ufffd" in result.stderr
+
+
+def test_invalid_utf8_plus_truncation_plus_timeout(tmp_path):
+    """Invalid bytes + bounded retention + timeout all coexist."""
+    plan = _stress_plan(
+        tmp_path,
+        "import sys, time\n"
+        "sys.stdout.buffer.write(b'\\xff' * 200000)\n"
+        "sys.stdout.flush()\n"
+        "time.sleep(60)\n",
+        timeout_seconds=2,
+    )
+    result = execute_plan(plan, timeout_seconds=2)
+
+    assert result.timed_out is True
+    assert len(result.stdout) <= MAX_OUTPUT_CHARS
+    assert result.stdout_truncated is True
+    assert result.duration_ms < 30000
+
+
+def test_child_python_stdio_is_utf8(tmp_path):
+    """PYTHONUTF8/PYTHONIOENCODING pin the child stdio codec to UTF-8."""
+    plan = _stress_plan(
+        tmp_path,
+        "import sys; sys.stdout.write('enc=' + sys.stdout.encoding)",
+    )
+    result = execute_plan(plan, timeout_seconds=30)
+
+    assert result.exit_code == 0
+    assert result.stdout.startswith("enc=")
+    codec = result.stdout.split("=", 1)[1].strip().lower()
+    assert codec.replace("-", "") == "utf8", codec
 
 
 def test_real_child_env_verification(tmp_path, monkeypatch):

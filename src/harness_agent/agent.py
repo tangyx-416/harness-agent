@@ -8,6 +8,12 @@ from strands.models.openai import OpenAIModel
 
 from .config import AgentConfig, get_prompts_dir
 from .tools.execution_tools import get_execution_result, prepare_command
+from .tools.git_tools import (
+    git_branches_tool,
+    git_diff_tool,
+    git_log_tool,
+    git_status_tool,
+)
 from .tools.project_tools import inspect_project
 from .tools.repository_tools import (
     analyze_dependencies,
@@ -99,6 +105,8 @@ def create_agent(config: AgentConfig | None = None) -> Agent:
     # v0.3.0: prepare_command / get_execution_result are the only execution
     # related tools exposed to the model. They can never run anything;
     # approval and subprocess execution stay in the trusted host layer.
+    # v0.4.0: git_status / git_diff / git_log / git_branches add READ-ONLY
+    # Git awareness -- fixed introspection argv, no mutation, no network.
     agent = Agent(
         model=model,
         system_prompt=system_prompt,
@@ -110,6 +118,10 @@ def create_agent(config: AgentConfig | None = None) -> Agent:
             analyze_dependencies,
             prepare_command,
             get_execution_result,
+            git_status_tool,
+            git_diff_tool,
+            git_log_tool,
+            git_branches_tool,
         ],
         name="HarnessAgent",
         description="A project repository assistant agent",

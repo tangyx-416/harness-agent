@@ -1,3 +1,3 @@
 """Harness Agent - A Single-Agent MVP based on Strands Agent SDK."""
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"

@@ -1,14 +1,19 @@
 # Harness Project Agent
 
-**Version: 0.3.0** | **Status: User-Approved Constrained Execution**
+**Version: 0.4.0** | **Status: Read-Only Git Awareness**
 
-A Single-Agent MVP built on the Strands Agents SDK, designed to help analyze and understand code repositories through natural language interaction, and to request (never perform) whitelisted command execution under explicit human approval.
+A Single-Agent MVP built on the Strands Agents SDK, designed to help analyze and understand code repositories through natural language interaction, to explain the repository's local Git state, diffs, history and branches (read-only), and to request (never perform) whitelisted command execution under explicit human approval.
 
 ## Overview
 
-This project implements a conversational AI agent that can safely browse, read, search, and understand a code repository. In v0.3.0 the agent gained the ability to *request* controlled execution of a tiny development-command allowlist. The core security model is:
+This project implements a conversational AI agent that can safely browse, read, search, and understand a code repository, and - since v0.4.0 - reason about its local Git state and history. In v0.3.0 the agent gained the ability to *request* controlled execution of a tiny development-command allowlist. The core security model is:
 
 > LLM proposes. Policy validates. User approves. Host executes.
+
+Git Awareness is NOT Git Authority:
+
+> Repository read: YES. Git read: YES. Controlled test run: YES (with approval).
+> Source write: NO. Git mutation: NO. Git network: NO.
 
 ## Architecture
 
@@ -16,12 +21,21 @@ This project implements a conversational AI agent that can safely browse, read, 
 User
  ↓
 Strands Agent
- ├── Repository Understanding Tools
+ ├── Repository Tools
  │    ├── inspect_project
  │    ├── list_directory
  │    ├── read_file
  │    ├── search_code
  │    └── analyze_dependencies
+ ├── Git Awareness Tools (READ-ONLY)
+ │    ├── git_status
+ │    ├── git_diff
+ │    ├── git_log
+ │    └── git_branches
+ │         ↓
+ │    Git Read Service (hardened fixed argv)
+ │         ↓
+ │    Local Repository Metadata
  └── prepare_command
       ↓
  Execution Policy (strict allowlist)
@@ -39,8 +53,9 @@ The agent uses a simple but extensible architecture:
 - **Agent Harness**: Strands Agents SDK manages the agent loop, tool calling, and conversation flow
 - **Model**: OpenAI-compatible language model for understanding and generation
 - **Repository Tools**: Read-only Python functions; every path is confined to the repository root via a shared safety module (`path_utils`)
+- **Git Awareness Tools**: Read-only Git introspection with fixed hardened argv; the model provides semantic parameters (scope/path/limit), never a Git subcommand
 - **Execution Layer**: The model can only *prepare* execution plans (`prepare_command`); validation, approval and subprocess execution live in the trusted host layer (`harness_agent.execution` + CLI). Execution is never automatically approved.
-- **System Prompt**: Defines the agent's behavior, tool strategy, execution state semantics, and anti-hallucination rules
+- **System Prompt**: Defines the agent's behavior, tool strategy, Git evidence rules, execution state semantics, and anti-hallucination rules
 
 ## Requirements
 
@@ -173,6 +188,26 @@ Agent > Denied: package installation is not allowed in v0.3.0.
         python -m pytest ... and python -m ruff check ...
 ```
 
+Git examples:
+```text
+You > What files have changed?
+
+Agent > [calls git_status and summarizes staged/unstaged/untracked]
+
+You > Explain the current changes in agent.py.
+
+Agent > [git_status → git_diff(path="src/harness_agent/agent.py") → answer]
+
+You > What happened in the last five commits?
+
+Agent > [git_log(limit=5) → answer]
+
+You > Commit these changes.
+
+Agent > Git mutation is not supported in v0.4.0.
+        I can inspect the status and diff instead.
+```
+
 ## Execution Safety Model
 
 Every execution request passes through these layers:
@@ -186,7 +221,8 @@ Every execution request passes through these layers:
 - **Secret scrubbing**: API keys, tokens, passwords and credential variables (`OPENAI_API_KEY`, `*_TOKEN`, `*_SECRET`, `*_PASSWORD`, `*_API_KEY`, `*_CREDENTIAL*` ...) never reach the child environment.
 - **Behavior-injection scrubbing**: `PYTHONPATH`, `PYTHONHOME`, `PYTHONSTARTUP`, `PYTHONINSPECT`, `PYTHONUSERBASE`, `PYTEST_ADDOPTS`, `PYTEST_PLUGINS` and `PYTEST_DEBUG` are removed so the environment cannot silently reshape the approved command. Child processes also get `PYTHONDONTWRITEBYTECODE=1`, `PYTHONNOUSERSITE=1` and `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1` (deterministic runs; this repository's own test suite passes with plugin autoload disabled).
 - **Timeout**: 30 seconds by default, clamped to a 60-second maximum. On timeout the directly managed subprocess is killed and any bounded partial output is returned.
-- **Bounded output capture**: reader threads drain stdout/stderr while the child runs; only the first 64 KB per stream is retained and the excess is discarded, so execution output retained in memory is bounded regardless of how much the child prints.
+- **Bounded output capture**: reader threads drain stdout/stderr while the child runs; only the first 64 KB per stream is retained and the excess is discarded, so execution output retained in memory is bounded regardless of how much the child prints. Invalid UTF-8 bytes are decoded with `errors="replace"` (U+FFFD) - a chatty or binary-emitting child can never crash a reader, deadlock a pipe, or lose the structured result.
+- **Deterministic child encoding**: child Python processes run with `PYTHONUTF8=1` and `PYTHONIOENCODING=utf-8`, pinning stdio to UTF-8 so captured output always matches the runner's decoding (a Windows Python child under a pipe would otherwise use the legacy locale codec).
 - **Single-use plans**: each approved plan executes exactly once; prepared-but-rejected plans can never run. Plans only transition `pending → approved → executed` or `pending → rejected`.
 
 Risk levels (`LOW`/`MEDIUM`/`HIGH`) are informational in v0.3.0. All execution still requires explicit approval.
@@ -194,6 +230,32 @@ Risk levels (`LOW`/`MEDIUM`/`HIGH`) are informational in v0.3.0. All execution s
 ### Note on Strands HITL
 
 Strands Agents 1.53.0 provides native HITL/interruption facilities (`strands.interrupt`, `AgentResult.interrupts`, `HumanInTheLoop`). v0.3.0 deliberately uses host-side approval instead: the Agent-visible tool only prepares an inert execution plan, and the privileged subprocess step lives outside the Agent tool layer - so approving tool calls inside the SDK would not guard the operation that actually needs guarding.
+
+## Git Awareness Safety Model (v0.4.0)
+
+Git Awareness exposes read-only Git operations:
+
+- **Fixed read-only Git operations**: only `rev-parse`, `status`, `diff`, `log` and `for-each-ref` are ever composed - no other subcommand exists in the code path
+- **No arbitrary Git argv**: the model passes semantic parameters (`scope`, `path`, `limit`); revisions, ranges, refs and options are not part of the tool surface
+- **shell=False**: Git is spawned as an argv list through the shared bounded process runner; `stdin=DEVNULL`
+- **No pager**: `--no-pager` plus `GIT_PAGER=cat` / `PAGER=cat`
+- **Optional locks disabled**: `--no-optional-locks` and `GIT_OPTIONAL_LOCKS=0`
+- **fsmonitor disabled**: `core.fsmonitor=false`
+- **External diff/textconv disabled**: `--no-ext-diff --no-textconv` (repo-configured diff helpers can never run)
+- **No submodule recursion**: `--ignore-submodules=all`
+- **Signature verification disabled**: `log.showSignature=false` (never `--show-signature`)
+- **No network operations**: no fetch/pull/push/clone/ls-remote is ever composed; `include_remote` reads locally stored `refs/remotes` metadata only
+- **Git environment scrub**: every inherited `GIT_*` variable (plus `SSH_ASKPASS`) is removed from the child environment; only host-set safe values are applied - `GIT_CONFIG_NOSYSTEM=1`, `GIT_CONFIG_GLOBAL=<devnull>`, `GIT_TERMINAL_PROMPT=0`, `GIT_ATTR_NOSYSTEM=1` (repository-local Git config remains readable so ordinary Git semantics work)
+- **Repository-root confinement**: the real Git toplevel (`rev-parse --show-toplevel`) must equal the agent repository root; mismatches are refused instead of widening the boundary
+- **Bounded output**: Git stdout retained is capped at 128 KB and stderr at 32 KB with truncation flags; status entries cap at 500, branches at 200, log at 50 commits, diff context at 10 lines. Output is decoded as UTF-8 with `errors="replace"`: filenames that are not valid UTF-8 display with replacement characters instead of crashing, deadlocking, or destroying the result.
+- **Literal pathspecs**: `--literal-pathspecs` plus lexical validation; pathspec magic (`:(glob)**`) cannot be injected; paths stay repository-relative (deleted tracked paths remain diffable)
+- **Untrusted-data-safe framing**: `git_log` uses NUL-terminated fields (`%H%x00%h%x00%an%x00%aI%x00%s%x00`) - NUL is the only byte the Git CLI can never place inside a commit subject or author name, so untrusted commit data cannot collide with the parser framing; `for-each-ref` uses `\x1f` fields, safe because `git check-ref-format` forbids control characters inside refnames. Malformed or truncated machine output degrades gracefully (records are skipped, never IndexError).
+
+Verified empirically on Git 2.48.1 (and enforced by argv/env contract tests): repository-local config **cannot** re-enable the disabled surface - `core.pager`, `core.fsmonitor`, `diff.external`, `diff.<driver>.textconv` markers are never executed, same-name aliases (`alias.status` etc.) never override builtin subcommands, and none of the five read-only operations invoke Git hooks.
+
+Residual Git config semantics (documented honestly): repository-local config - including `[include]` / `includeIf` expansion - is still read by Git for ordinary read-operation behavior. Because the hardened command-line `-c` values and flags take precedence over every config source and no mutation/network subcommand can ever be composed, includes cannot breach the mutation/network boundary; they remain a residual *semantic* influence on display formatting only.
+
+**No Git mutation tools are available in v0.4.0.** Git data (commit messages, diffs, filenames, branch names) is treated as untrusted repository data - never as instructions or authorization.
 
 ## Important Limitation
 
@@ -207,6 +269,17 @@ This is **not** an OS-level sandbox.
 
 Timeout terminates the directly managed subprocess, but v0.3.0 does not
 provide an OS-level guarantee that every descendant process is terminated.
+
+Git read tools execute the local Git executable using fixed read-only argv
+(no user approval gate like execution, because they are host-controlled
+introspection APIs - this is NOT the same as allowing arbitrary Git).
+Git read operations are in general read-only, but Git Awareness does not
+claim that the Git process performs zero filesystem writes under every
+Git implementation. The Agent itself has absolutely no Git mutation
+commands.
+
+`origin/main` and ahead/behind values are locally stored remote-tracking
+information - not live GitHub state.
 
 ## Testing
 
@@ -228,7 +301,7 @@ Run with coverage:
 pytest --cov=harness_agent
 ```
 
-## Current Features (v0.3.0)
+## Current Features (v0.4.0)
 
 - ✅ **Single Strands Agent**: One conversational agent with clear responsibilities
 - ✅ **OpenAI-Compatible Models**: Works with OpenAI, local vLLM, and other compatible endpoints
@@ -237,20 +310,22 @@ pytest --cov=harness_agent
 - ✅ **Safe File Reading**: Line-numbered reads with line ranges (`read_file`)
 - ✅ **Repository Code Search**: Pure-Python substring/regex search (`search_code`)
 - ✅ **Dependency Analysis**: pyproject.toml / requirements*.txt / package.json (`analyze_dependencies`)
+- ✅ **Read-Only Git Awareness**: status, diff, log, branches with hardened fixed argv (`git_status` / `git_diff` / `git_log` / `git_branches`)
 - ✅ **User-Approved Execution**: `prepare_command` requests, policy validates, user approves, host executes
 - ✅ **Execution Policy**: Strict allowlist, per-flag validation, shell-syntax rejection
 - ✅ **Bounded Streaming Capture**: stdout/stderr drained while the child runs; only the first 64 KB per stream is retained (memory-bounded)
 - ✅ **Read-Only Repository Boundary**: Path confinement, sensitive file blocking, binary detection, output limits
 - ✅ **CLI Interface**: Interactive terminal-based conversation with an execution approval prompt
 - ✅ **Configuration Management**: Environment-based config with validation
-- ✅ **Deterministic Tests**: 222 passing tests with mocked/fake dependencies
+- ✅ **Deterministic Tests**: 320 passing tests with mocked/fake dependencies
 
 ### Verification Status
 
-- **Tests**: 222/222 deterministic/mock tests passing
+- **Tests**: 320/320 deterministic/mock tests passing
 - **SDK Integration**: Verified locally with Strands Agents 1.53.0
-- **Execution Smoke**: `scripts/smoke_execution.py` - 33/33 checks passing (host-level, no API key needed)
+- **Execution Smoke**: `scripts/smoke_execution.py` - 35/35 checks passing (host-level, no API key needed)
 - **Repository Smoke**: `scripts/smoke_repo_tools.py` passing (v0.2 regression)
+- **Git Awareness Smoke**: `scripts/smoke_git_awareness.py` - 21/21 checks passing on the real repository (read-only before/after proof)
 - **Real LLM Execution**: Requires a valid OpenAI API key
 - **Live API Smoke Test**: Has not yet been performed in this environment
 
@@ -259,13 +334,15 @@ This is a **stable development baseline**, not a production-ready system.
 ### Safety Features
 
 - **Read-only repository tools**: inspection tools never modify anything
-- **Repository-root confinement**: All repository-facing tools (including `inspect_project`) refuse paths outside the project root
+- **Read-only Git awareness**: fixed introspection argv, no mutation surface, no network
+- **Repository-root confinement**: All repository-facing tools (including `inspect_project`) refuse paths outside the project root; Git toplevel must match the agent root
 - **Sensitive file filtering**: `.env`, keys, credentials are blocked; `.env.example` is allowed
 - **Ignored directories**: `.git`, `.venv`, `__pycache__`, `node_modules`, `dist`, `build` are never touched
 - **Binary detection**: By extension and content sniffing
-- **Output limits**: Depth/entry/line/result caps with `truncated` flags
-- **Constrained execution**: allowlist + approval + argv-based subprocess + timeout + output caps + secret scrubbing
+- **Output limits**: Depth/entry/line/result caps with `truncated` flags; Git output bounded at 128 KB / 32 KB
+- **Constrained execution**: allowlist + approval + argv-based subprocess + timeout + bounded capture + secret scrubbing
 - **No source mutation**: no write/edit/delete tools, no `ruff --fix`, no patch/apply tools
+- **No Git mutation**: no add/commit/push/checkout/... tools exist in any layer
 
 ## Project Structure
 
@@ -276,24 +353,32 @@ Harness Agent/
 │       ├── __init__.py
 │       ├── agent.py                    # Agent factory and initialization
 │       ├── config.py                   # Configuration management
+│       ├── process.py                  # Shared bounded process runner (Popen + threads)
 │       ├── prompts/
-│       │   └── system.md               # System prompt (understanding + execution semantics)
+│       │   └── system.md               # System prompt (understanding + git + execution semantics)
 │       ├── execution/
 │       │   ├── __init__.py             # Package exports + default broker
 │       │   ├── models.py               # ExecutionPlan / ExecutionResult / PolicyDecision
 │       │   ├── policy.py               # Strict allowlist validation
 │       │   ├── broker.py               # Pending plans, single-use lifecycle
 │       │   └── service.py              # Host subprocess service (shell=False)
+│       ├── git_awareness/
+│       │   ├── __init__.py             # Package exports
+│       │   ├── models.py               # GitStatus / GitCommit / GitBranch
+│       │   ├── parsers.py              # porcelain v2 / log / for-each-ref parsers
+│       │   └── service.py              # Hardened read-only Git service
 │       └── tools/
 │           ├── __init__.py
 │           ├── path_utils.py           # Shared path-safety module
 │           ├── project_tools.py        # inspect_project (root-confined)
 │           ├── repository_tools.py     # list_directory / read_file / search_code / analyze_dependencies
-│           └── execution_tools.py      # prepare_command / get_execution_result
+│           ├── execution_tools.py      # prepare_command / get_execution_result
+│           └── git_tools.py            # git_status / git_diff / git_log / git_branches
 ├── scripts/
 │   ├── run_agent.py                    # CLI entry point + approval prompt
 │   ├── smoke_repo_tools.py             # Manual tool/security smoke script (v0.2)
-│   └── smoke_execution.py              # Execution/security smoke script (v0.3)
+│   ├── smoke_execution.py              # Execution/security smoke script (v0.3)
+│   └── smoke_git_awareness.py          # Git awareness/read-only smoke script (v0.4)
 ├── tests/
 │   ├── test_agent_factory.py           # Agent factory + tool registration tests
 │   ├── test_cli.py                     # CLI tests
@@ -302,8 +387,15 @@ Harness Agent/
 │   ├── test_execution_broker.py        # Plan lifecycle tests
 │   ├── test_execution_policy.py        # Allowlist policy tests
 │   ├── test_execution_service.py       # Host service tests (fake subprocess)
+│   ├── test_git_branches.py            # Branch listing tests
+│   ├── test_git_diff.py                # Diff scope/path/limits tests
+│   ├── test_git_log.py                 # History parsing tests
+│   ├── test_git_service.py             # Git env/boundary/argv tests
+│   ├── test_git_status.py              # Status parsing/lifecycle tests
+│   ├── test_git_tools.py               # Git tool surface tests
 │   ├── test_repository_tools.py        # Repository tool tests
-│   └── test_tools.py                   # inspect_project tests
+│   ├── test_tools.py                   # inspect_project tests
+│   └── git_test_utils.py               # Disposable tmp git repo helpers
 ├── .env.example                        # Example environment configuration
 ├── .gitignore                          # Git ignore patterns
 ├── pyproject.toml                      # Project metadata and dependencies
@@ -314,9 +406,8 @@ Harness Agent/
 
 ## Roadmap
 
-v0.2.0 delivered the Repository Understanding layer; v0.3.0 delivered User-Approved Safe Execution. Future versions will add:
+v0.2.0 delivered the Repository Understanding layer; v0.3.0 delivered User-Approved Safe Execution; v0.4.0 delivered Read-Only Git Awareness. Future versions will add:
 
-- **v0.4**: Git awareness (status, diff, log - read-only)
 - **v0.5**: Memory system (conversation history, learned facts)
 - **v0.6**: Planning capabilities (multi-step task decomposition)
 - **v0.7**: Multi-agent coordination (specialist agents for different tasks)
@@ -324,7 +415,7 @@ v0.2.0 delivered the Repository Understanding layer; v0.3.0 delivered User-Appro
 
 ## Development Status
 
-**v0.3.0 is the current development baseline.**
+**v0.4.0 is the current development baseline.**
 
 ### Implemented
 
@@ -334,17 +425,19 @@ v0.2.0 delivered the Repository Understanding layer; v0.3.0 delivered User-Appro
 - Directory browsing, safe file reading, code search, dependency analysis
 - Shared repository path-safety module
 - Read-only safety boundary
+- Read-only Git awareness (status/diff/log/branches, hardened argv, no network)
 - User-approved constrained execution (allowlist + policy + approval + host service)
 - CLI interface with execution approval prompt
 - Environment configuration
-- 222 deterministic tests
+- 320 deterministic tests
 
 ### Not Implemented
 
 - File writing/modification
 - Source editing / patch tools
 - Package installation
-- Git operations
+- Git mutation (add/commit/push/checkout/reset/merge/rebase/clean)
+- Git network operations (fetch/pull/push/clone/ls-remote)
 - OS-level sandboxing
 - Memory system
 - Planning capabilities
@@ -384,6 +477,13 @@ Test the following interactions:
    Expected: the agent prepares `python -m pytest` via `prepare_command`,
    the CLI shows the approval prompt, and nothing runs until you type
    `y`. Declining must result in zero subprocess execution.
+
+5. **Read-only Git awareness**:
+   ```
+   You > What files have changed and what branch am I on?
+   ```
+   Expected: the agent uses `git_status` (and optionally `git_diff`),
+   reports local Git state, and never mutates anything.
 
 **Note**: This is not part of the automated test suite as it requires a real API key and incurs API costs. All automated tests use mocked dependencies.
 
@@ -444,4 +544,4 @@ This is a personal learning and development project. Feel free to fork and adapt
 
 ---
 
-**Version**: 0.3.0 | **Status**: Active Development (User-Approved Constrained Execution) | **Python**: 3.10+
+**Version**: 0.4.0 | **Status**: Active Development (Read-Only Git Awareness) | **Python**: 3.10+

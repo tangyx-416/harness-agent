@@ -5,6 +5,36 @@ All notable changes to the Harness Project Agent will be documented in this file
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - 2026-09-01
+
+### Added
+
+- Read-only Git status awareness (`git_status`) via machine-readable `--porcelain=v2 --branch -z` (branch, HEAD, upstream, ahead/behind, staged/unstaged/untracked/conflicts; Unicode, spaces, renames with old_path, deleted files, unborn repositories, detached HEAD)
+- Safe Git diff inspection (`git_diff`) with fixed scope enum (`working` / `staged` / `head`), literal repository-relative path filter, clamped context lines and bounded output
+- Commit history inspection (`git_log`) - HEAD-only, structured commits (hash, author, ISO date, subject), 1-50 limit, robust delimiter parsing
+- Local branch awareness (`git_branches`) via `for-each-ref` (locally stored remote-tracking refs only, never network)
+- Git repository boundary validation: real `rev-parse --show-toplevel` must equal the agent repository root (supports `.git` dir and `.git` file / worktrees)
+- Bounded Git subprocess output (128 KB stdout / 32 KB stderr) through the shared bounded process runner
+- Git Awareness smoke script (`scripts/smoke_git_awareness.py`) with a before/after read-only proof
+- Test coverage increased from 240 to 320 deterministic tests
+
+### Security
+
+- No arbitrary Git command tool: the model supplies semantic parameters only (scope/path/limit), never a Git subcommand or raw option
+- No Git mutation operations: only rev-parse / status / diff / log / for-each-ref are ever composed
+- No Git network operations: no fetch/push/pull/clone/ls-remote; ahead/behind are local tracking-ref metadata
+- Git environment sanitization: all inherited `GIT_*` variables removed, then only host-set safe values applied (`GIT_CONFIG_NOSYSTEM`, `GIT_CONFIG_GLOBAL=devnull`, `GIT_TERMINAL_PROMPT=0`, `GIT_PAGER=cat`, `GIT_OPTIONAL_LOCKS=0`, `GIT_ATTR_NOSYSTEM=1`, `PAGER=cat`)
+- Pager disabled (`--no-pager`), optional locks disabled (`--no-optional-locks`), fsmonitor disabled (`core.fsmonitor=false`), external diff/textconv disabled (`--no-ext-diff --no-textconv`), signature verification disabled (`log.showSignature=false`), pathspec magic disabled (`--literal-pathspecs`), Unicode paths unquoted (`core.quotepath=false`)
+- No submodule recursion (`--ignore-submodules=all` on status/diff scope)
+- prepare_command continues to deny git - Git tools and the execution allowlist are separate authority layers
+
+### Fixed
+
+- `git_log` framing hardened: NUL-terminated fields replace `\x1f`/`\x1e` delimiters that untrusted commit subjects/authors could collide with (verified creatable via the Git CLI); malformed/truncated machine output is skipped safely instead of misparsing
+- Shared bounded runner decoding: invalid UTF-8 child output (stdout, stderr, or both) is decoded with `errors="replace"` - proven by real-process tests that it cannot crash a reader thread, deadlock a pipe, or lose the structured result (including under simultaneous truncation and timeout)
+- Child Python stdio pinned to UTF-8 (`PYTHONUTF8=1`, `PYTHONIOENCODING=utf-8`) so captured output always matches the runner's decoding (a Windows Python child under a pipe otherwise used the legacy locale codec)
+- `git status`/`for-each-ref` parsers hardened against malformed, truncated and garbage machine streams (no IndexError; structured results always returned)
+
 ## [0.3.0] - 2026-09-01
 
 ### Added
