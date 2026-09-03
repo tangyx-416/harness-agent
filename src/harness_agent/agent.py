@@ -8,6 +8,7 @@ from strands.models.openai import OpenAIModel
 
 from .config import AgentConfig, get_prompts_dir
 from .execution import ExecutionBroker
+from .patch import PatchBroker
 from .session import SessionState
 from .tools.execution_tools import make_execution_tools
 from .tools.git_tools import (
@@ -16,6 +17,7 @@ from .tools.git_tools import (
     git_log_tool,
     git_status_tool,
 )
+from .tools.patch_tools import make_patch_tools
 from .tools.project_tools import inspect_project
 from .tools.repository_tools import (
     analyze_dependencies,
@@ -43,6 +45,7 @@ def create_agent(
     config: AgentConfig | None = None,
     session_state: SessionState | None = None,
     execution_broker: ExecutionBroker | None = None,
+    patch_broker: PatchBroker | None = None,
 ) -> Agent:
     """Create and configure a Harness Agent.
 
@@ -61,6 +64,8 @@ def create_agent(
             state is created when omitted.
         execution_broker: Optional explicit execution broker. A fresh private
             broker is created when omitted.
+        patch_broker: Optional explicit patch broker. A fresh private broker is
+            created when omitted.
 
     Returns:
         Agent: Configured agent ready to process requests
@@ -103,6 +108,12 @@ def create_agent(
     bound_broker = execution_broker or ExecutionBroker()
     exec_prepare, exec_result = make_execution_tools(bound_broker)
 
+    # v0.6.0: every factory call owns an isolated patch broker unless the host
+    # explicitly supplies one. It holds only pending/approved patch proposals
+    # for THIS agent; source edits are applied only by the host layer.
+    bound_patch_broker = patch_broker or PatchBroker()
+    patch_prepare, patch_result = make_patch_tools(bound_patch_broker)
+
     # Create tool - Strands @tool decorator makes functions into tools.
     # The public model-facing name is 'inspect_project' (matches docs and
     # the other repository tools); the Python wrapper keeps a distinct name.
@@ -135,6 +146,8 @@ def create_agent(
     # v0.5.0: four closure-bound task tools and two closure-bound execution
     # tools mutate only the explicit, process-local SessionState and broker.
     # They add no execution or mutation authority.
+    # v0.6.0: two closure-bound patch tools validate + register pending source
+    # edit proposals in the explicit patch broker. They never write files.
     agent = Agent(
         model=model,
         system_prompt=system_prompt,
@@ -151,6 +164,8 @@ def create_agent(
             git_log_tool,
             git_branches_tool,
             *task_tools,
+            patch_prepare,
+            patch_result,
         ],
         name="HarnessAgent",
         description="A project repository assistant agent",

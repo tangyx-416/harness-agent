@@ -479,6 +479,56 @@ class SessionState:
                 reference=clean_plan_id,
             )
 
+    def record_patch_approved(self, plan_id: str) -> SessionEvent:
+        """Record a host-verified patch approval as metadata only."""
+        clean_plan_id = self._normalize_reference(plan_id, "plan_id")
+        with self._lock:
+            return self._append_event_locked(
+                event_type="patch_approved",
+                summary="Source edit approved by the host-side user approval flow.",
+                reference=clean_plan_id,
+            )
+
+    def record_patch_rejected(self, plan_id: str) -> SessionEvent:
+        """Record a host-verified patch rejection as metadata only."""
+        clean_plan_id = self._normalize_reference(plan_id, "plan_id")
+        with self._lock:
+            return self._append_event_locked(
+                event_type="patch_rejected",
+                summary="Source edit rejected by the host-side user approval flow.",
+                reference=clean_plan_id,
+            )
+
+    def record_patch_applied(self, plan_id: str) -> SessionEvent:
+        """Record a host-verified, successfully applied edit as metadata only."""
+        clean_plan_id = self._normalize_reference(plan_id, "plan_id")
+        with self._lock:
+            return self._append_event_locked(
+                event_type="patch_applied",
+                summary="Source edit applied by the host.",
+                reference=clean_plan_id,
+            )
+
+    def record_patch_conflict(self, plan_id: str) -> SessionEvent:
+        """Record a host-verified apply conflict (no write) as metadata only."""
+        clean_plan_id = self._normalize_reference(plan_id, "plan_id")
+        with self._lock:
+            return self._append_event_locked(
+                event_type="patch_conflict",
+                summary="Source edit apply conflicted; no file was written.",
+                reference=clean_plan_id,
+            )
+
+    def record_patch_failed(self, plan_id: str) -> SessionEvent:
+        """Record a host-verified apply failure as metadata only."""
+        clean_plan_id = self._normalize_reference(plan_id, "plan_id")
+        with self._lock:
+            return self._append_event_locked(
+                event_type="patch_failed",
+                summary="Source edit apply failed; the source was not changed.",
+                reference=clean_plan_id,
+            )
+
     def _append_event_locked(
         self,
         *,

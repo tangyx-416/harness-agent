@@ -189,7 +189,7 @@ def test_create_agent_registers_all_v03_tools():
 
 
 def test_create_agent_registers_exactly_fifteen_v05_tools():
-    """v0.5.0 exposes exactly 15 tools; host operations remain hidden."""
+    """v0.5.0 exposed exactly 15 tools; those remain a subset in v0.6.0."""
     config = AgentConfig(api_key="test-key", model_id="gpt-4", base_url=None)
 
     with patch("harness_agent.agent.OpenAIModel"), patch(
@@ -199,13 +199,11 @@ def test_create_agent_registers_exactly_fifteen_v05_tools():
         create_agent(config, session_state=SessionState())
 
     tools = mock_agent_class.call_args.kwargs["tools"]
-    tool_names = [
+    tool_names = {
         getattr(item, "tool_name", getattr(item, "__name__", ""))
         for item in tools
-    ]
-    assert len(tools) == 15
-    assert len(set(tool_names)) == 15
-    assert set(tool_names) == {
+    }
+    v05_expected = {
         "inspect_project",
         "list_directory",
         "read_file",
@@ -222,7 +220,57 @@ def test_create_agent_registers_exactly_fifteen_v05_tools():
         "update_task_step",
         "add_task_steps",
     }
+    assert v05_expected <= tool_names
     assert not ({"approve", "reject", "execute", "execute_task"} & set(tool_names))
+
+
+def test_create_agent_registers_exactly_seventeen_v06_tools():
+    """v0.6.0 exposes exactly 17 tools; host operations remain hidden."""
+    config = AgentConfig(api_key="test-key", model_id="gpt-4", base_url=None)
+
+    with patch("harness_agent.agent.OpenAIModel"), patch(
+        "harness_agent.agent.Agent"
+    ) as mock_agent_class:
+        mock_agent_class.return_value = Mock()
+        create_agent(config, session_state=SessionState())
+
+    tools = mock_agent_class.call_args.kwargs["tools"]
+    tool_names = [
+        getattr(item, "tool_name", getattr(item, "__name__", ""))
+        for item in tools
+    ]
+    assert len(tools) == 17
+    assert len(set(tool_names)) == 17
+    assert set(tool_names) == {
+        "inspect_project",
+        "list_directory",
+        "read_file",
+        "search_code",
+        "analyze_dependencies",
+        "git_status",
+        "git_diff",
+        "git_log",
+        "git_branches",
+        "prepare_command",
+        "get_execution_result",
+        "create_task_plan",
+        "get_task_state",
+        "update_task_step",
+        "add_task_steps",
+        "prepare_patch",
+        "get_patch_result",
+    }
+    assert not (
+        {
+            "approve",
+            "reject",
+            "execute",
+            "execute_task",
+            "apply_patch",
+            "approve_patch",
+        }
+        & set(tool_names)
+    )
 
 
 def test_create_agent_task_tools_bind_explicit_session_state():

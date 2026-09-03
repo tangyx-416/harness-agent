@@ -5,7 +5,47 @@ All notable changes to the Harness Project Agent will be documented in this file
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.5.0] - 2026-09-01
+## [0.6.0] - 2026-09-03
+
+### Added
+
+- User-Approved Source Editing via a Patch Broker (`prepare_patch` / `get_patch_result`): the agent proposes immutable, single-file source edits or creates, and the host asks the user before applying any write
+- Four-stage security model documented and enforced: `LLM proposes -> Patch Policy validates -> User approves -> Host applies`
+- Patch policy (`prepare_patch`) validating exact byte-for-byte `old_text` matches, single unique occurrence, overlapping-replacement detection, path/repo-root confinement, sensitive and ignored-path blocking, binary/encoding guards, and per-file size limits
+- Immutable `PatchPlan` / `PatchReplacement` / `PatchResult` models and a single-use lifecycle: `pending -> approved -> applied|conflict|failed` or `pending -> rejected` (`PatchBroker`)
+- Host-only patch service (`apply_approved`) with atomic replace for edits, `O_CREAT|O_EXCL` for creates, SHA-256 conflict detection, and temp cleanup on failure - the only module that writes files
+- COMPLETE unified diff returned with every proposal (never truncated) for host and user review
+- CLI approval prompt and `process_pending_patches`: only `y`/`yes` approves (Enter, `n`, other input, EOF and Ctrl+C all reject with ZERO file write); approved plans apply exactly once
+- `PatchBroker` isolated per agent factory call (private broker when the host supplies none; closure-bound `make_patch_tools`)
+- Patch session events (`patch_approved`, `patch_rejected`, `patch_applied`, `patch_conflict`, `patch_failed`) recorded as metadata-only - the actual code content never enters durable session state
+- System prompt updated: role now "User-Approved Source Editing", a Source Editing Strategy section, and a No same-turn dependent execution rule (never claim an edit until `status == 'applied'`)
+- Source-editing smoke script (`scripts/smoke_source_editing.py`) with 24 checks running with no LLM API access
+- Test coverage increased from 454 to 568 deterministic tests (final v0.6.0 audit suite: 658 passed, 6 skipped)
+
+### Safety
+
+- The agent has no direct file-write tool; `patch_tools.py` and all non-service modules are statically free of `open("w")`, `write_text`, `write_bytes`, `os.replace` and `unlink`
+- File writes are confined to `patch/service.py`; patch tools only validate and register pending proposals
+- No file deletion, move or rename API anywhere in the patch subsystem
+- Source edits are never applied autonomously; only the host, after explicit user approval, may write
+- The `patch_broker` never grants execution, Git, network, or approval authority; execution and Git boundaries are unchanged
+- Patch apply revalidates the target path and file hash at write time, refusing conflicts and symlink/escapes introduced after preparation
+
+### Fixed (Release Audit 指令9)
+
+- **CRLF-aware exact matching**: `read_file` returned raw LF text for a CRLF file that the policy could not match for editing. Prepare now normalizes each line to `\n` for matching and reconstructs the exact original newline (`\r\n` or `\n`) on write, so LF, CRLF and BOM source files edit correctly (byte-for-byte `proposed_sha256` still holds).
+- **Mixed newlines explicitly REJECTED**: a file mixing `\r\n` and `\n` (or CR-only) is refused and left byte-identical - the policy never silently normalizes.
+- **`No newline at end of file` markers**: the approval diff now shows a git-style marker whenever a final newline is added or removed, so a newline-only change is never invisible.
+- **Safe terminal rendering**: the CLI renders untrusted patch paths, summaries and diffs through `render_untrusted_terminal_text`, which escapes C0/C1/DEL control bytes and Unicode bidi / *Trojan Source* (U+202A-202E, U+2066-2069, U+206A-206F) codepoints - display-only, the proposed content bytes are untouched.
+- **Structured lone-surrogate rejection**: a surrogate in a path, summary or replacement no longer escapes as an uncaught `UnicodeEncodeError`; it is rejected with a `PatchPolicyError` before any write.
+- **Windows path hardening**: reserved device-name stems (`con`, `prn`, `aux`, `nul`, `clock$`, `com1..9`, `lpt1..9`), trailing dot/space components, and control characters in path components are all rejected; drive-relative/UNC and NTFS ADS (`:`) paths were already refused.
+- **Junction / reparse escape**: path-resolution re-validation refuses a junction or symlink whose resolved target escapes the repository root, covered by contract tests even where Windows forbids creating a real symlink.
+- **Create content byte cap + proposed-result byte cap**: encoded-byte budget is enforced in addition to character caps, so a create/edit can never produce a file over the byte limit (defense-in-depth on top of the char caps).
+- **Explicit `applying` claim state**: an approved plan is claimed exactly once via `take_for_apply` (`approved → applying`) under a single lock before any apply; a second (even concurrent) caller is refused, and `record_application` finalises only from `applying`. Concurrent apply/create is exactly-once at both the broker and the filesystem level.
+- **Per-process plan-history bound**: a broker retains at most `MAX_PATCH_PLANS` (200) plans; every plan ever registered counts (terminal plans are still counted) and a boundary apply-at-limit is not auto-granted.
+- Test coverage: 91 new regression tests added in `tests/test_release_audit.py` (~450 lines) covering deep immutability, approval-to-write integrity, exactly-once concurrency, safe rendering, newline/BOM semantics, Windows path safety, size bounds, replacement semantics, injection rejection, CLI preview/per-plan approval, broker bounds, hard-link semantics and apply-time revalidation.
+
+
 
 ### Added
 

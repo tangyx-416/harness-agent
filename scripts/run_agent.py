@@ -15,6 +15,11 @@ metadata is recorded in that same state, without retaining stdout, stderr,
 environment data or secrets. The agent's execution-request tools are bound
 to that same broker, so task state, execution plans and execution results
 all belong to one CLI runtime.
+
+v0.6.0: one explicit PatchBroker is added. The agent may PREPARE single-file
+source-edit proposals; the CLI shows the COMPLETE diff and the user approves
+or rejects each one. Only the host applies an approved patch via the patch
+service. Patch plans, results and host events stay isolated to this CLI.
 """
 
 import sys
@@ -30,6 +35,12 @@ from harness_agent.execution import (
     execute_approved,
     get_default_broker,
 )
+from harness_agent.patch import (
+    PatchBroker,
+    apply_approved,
+    render_untrusted_terminal_text,
+)
+from harness_agent.tools.path_utils import find_repo_root
 from harness_agent.session import SessionState
 
 #: Input lines that count as explicit approval. Everything else -- empty
@@ -44,8 +55,9 @@ _RESULT_ECHO_CHARS = 2000
 def print_banner():
     """Print welcome banner."""
     print("=" * 60)
-    print("Harness Agent v0.5")
+    print("Harness Agent v0.6")
     print("Session state: ephemeral (cleared when this CLI exits).")
+    print("Source edits: proposed by the agent, applied only after you approve.")
     print("Type 'exit' or 'quit' to stop, Ctrl+C to interrupt.")
     print("=" * 60)
     print()
@@ -148,6 +160,78 @@ def process_pending_executions(
         _echo_result(result)
 
 
+def _show_patch_proposal(plan) -> None:
+    """Render the COMPLETE diff of one pending patch plan for user review.
+
+    The diff, summaries and path are untrusted data (the agent controls the
+    proposed source text). We render them through
+    :func:`render_untrusted_terminal_text` so any ANSI escape / control / bidi
+    characters are shown as visible escaped notation and can never manipulate
+    the terminal or hide the real change. This is a display-only transform:
+    the proposed content held in the immutable plan is never altered.
+    """
+    print("-" * 60)
+    print("Patch proposal required")
+    print()
+    print(f"Operation: {plan.operation}")
+    print(f"File:      {render_untrusted_terminal_text(plan.repo_path)}")
+    for line in plan.summaries:
+        print(f"Summary:   {render_untrusted_terminal_text(line)}")
+    print()
+    print("Complete diff:")
+    print(render_untrusted_terminal_text(plan.diff) if plan.diff else "(no diff)")
+    print("-" * 60)
+
+
+def _request_patch_approval(plan) -> bool:
+    """Ask the user to approve one patch plan. Only explicit y/yes approves."""
+    _show_patch_proposal(plan)
+    try:
+        answer = input("Apply this patch? [y/N]: ")
+    except (KeyboardInterrupt, EOFError):
+        print("\n(Cancelled)")
+        return False
+    return answer.strip().lower() in _APPROVAL_WORDS
+
+
+def process_pending_patches(
+    patch_broker: PatchBroker,
+    session_state: SessionState | None = None,
+    root=None,
+) -> None:
+    """Show pending patch plans to the user and apply the approved ones.
+
+    This is the trusted host layer: the user approves/rejects each COMPLETE
+    diff here (never the model). Approval authorizes exactly one apply attempt,
+    performed by :func:`harness_agent.patch.service.apply_approved`.
+    """
+    if root is None:
+        root = find_repo_root()
+    for plan in patch_broker.pending():
+        if not _request_patch_approval(plan):
+            patch_broker.reject(plan.id)
+            if session_state is not None:
+                session_state.record_patch_rejected(plan.id)
+            print("Patch cancelled: ZERO file writes occurred.\n")
+            continue
+        try:
+            if session_state is not None:
+                session_state.record_patch_approved(plan.id)
+            patch_broker.approve(plan.id)
+            result = apply_approved(patch_broker, plan.id, root)
+        except Exception as exc:
+            print(f"Patch apply error: {exc}\n")
+            continue
+        if session_state is not None:
+            if result.status == "applied":
+                session_state.record_patch_applied(plan.id)
+            elif result.status == "conflict":
+                session_state.record_patch_conflict(plan.id)
+            else:
+                session_state.record_patch_failed(plan.id)
+        print(f"Patch result: {result.status} -- {result.message}\n")
+
+
 def main():
     """Run the interactive agent CLI."""
     # Load configuration and create agent
@@ -155,10 +239,12 @@ def main():
         config = AgentConfig.from_env()
         session_state = SessionState()
         execution_broker = ExecutionBroker()
+        patch_broker = PatchBroker()
         agent = create_agent(
             config,
             session_state=session_state,
             execution_broker=execution_broker,
+            patch_broker=patch_broker,
         )
     except ValueError as e:
         print(f"Configuration Error: {e}", file=sys.stderr)
@@ -198,6 +284,14 @@ def main():
                 # v0.5.0: this CLI's own broker is used, never a shared one.
                 process_pending_executions(
                     broker=execution_broker, session_state=session_state
+                )
+
+                # v0.6.0: the agent may also have prepared source-edit patches.
+                # The user approves/rejects each COMPLETE diff here; only the
+                # host applies anything.
+                process_pending_patches(
+                    patch_broker=patch_broker,
+                    session_state=session_state,
                 )
 
             except KeyboardInterrupt:
