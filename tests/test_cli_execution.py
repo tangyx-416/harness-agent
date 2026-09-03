@@ -286,3 +286,21 @@ def test_approval_has_no_bypass_flags():
     assert "--yes" not in source
     assert "--force" not in source
     assert run_agent._APPROVAL_WORDS == frozenset({"y", "yes"})
+
+
+def test_process_pending_executions_remains_compatible_without_session_state():
+    """Existing callers may omit v0.5 task state without changing approval UX."""
+    broker, plan_id = prepared_broker()
+    with patch("builtins.input", return_value="n"), patch(
+        "sys.stdout", new_callable=StringIO
+    ):
+        run_agent.process_pending_executions(broker)
+    assert broker.status(plan_id) == STATUS_REJECTED
+
+
+def test_cli_banner_discloses_ephemeral_session_state():
+    with patch("sys.stdout", new_callable=StringIO) as output:
+        run_agent.print_banner()
+    text = output.getvalue().lower()
+    assert "v0.5" in text
+    assert "session state: ephemeral" in text

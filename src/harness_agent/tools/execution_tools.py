@@ -1,4 +1,4 @@
-"""Agent-visible execution request tools (v0.3.0).
+"""Agent-visible execution request tools (v0.3.0 / v0.5.0 isolation).
 
 Exposes exactly two tools to the model:
 
@@ -7,9 +7,11 @@ Exposes exactly two tools to the model:
 * ``get_execution_result`` -- read-only lookup of a stored result (or the
   plan's lifecycle status). NEVER runs anything.
 
-The model can REQUEST execution; it can never EXECUTE it. Approval and
-subprocess spawning live in the trusted host layer (see
-``harness_agent.execution`` and the CLI).
+v0.5.0: :func:`make_execution_tools` produces closure-bound tool instances
+that share a single :class:`ExecutionBroker`, isolating execution state per
+agent session. The module-level ``prepare_command`` / ``get_execution_result``
+remain available for backward compatibility (they use the process-global
+default broker).
 """
 
 from __future__ import annotations
@@ -202,3 +204,71 @@ def get_execution_result_core(
     return _get_execution_result(
         broker if broker is not None else _gdb(), plan_id
     )
+
+
+def make_execution_tools(
+    broker: ExecutionBroker,
+) -> tuple[Any, Any]:
+    """Create exactly two Strands tools sharing ``broker``.
+
+    This mirrors the closure-bound pattern of :func:`task_tools.make_task_tools`
+    and ensures that all execution plans prepared by one agent instance are
+    isolated to that agent's broker -- no cross-session leakage.
+    """
+    if not isinstance(broker, ExecutionBroker):
+        raise TypeError("broker must be an ExecutionBroker instance")
+
+    @tool(name="prepare_command")
+    def prepare_command_bound(
+        program: str,
+        args: list[str] | None = None,
+        cwd: str = ".",
+        timeout_seconds: int | None = None,
+    ) -> dict[str, Any]:
+        """Request approval to run a whitelisted development command.
+
+        Prepares a pending execution plan for the host to show to the user.
+        This tool NEVER executes anything itself. Allowed programs are
+        strictly limited: 'python' (with '--version', '-m pytest ...' or
+        '-m ruff check ...'), or the aliases 'pytest' / 'ruff'. Shell
+        syntax, package installation, git and arbitrary scripts are denied.
+
+        Args:
+            program: Program name, e.g. 'python', 'pytest' or 'ruff'.
+            args: Argument tokens, e.g. ['-m', 'pytest', '-q', 'tests'].
+            cwd: Working directory relative to the repository root (default '.').
+            timeout_seconds: Optional timeout, clamped to 1-60 seconds.
+
+        Returns:
+            {'ok': True, 'requires_approval': True, 'plan_id', 'command',
+            'cwd', 'risk', 'risk_reason', ...} when prepared, or
+            {'ok': False, 'denied': True, 'error'} when the policy refuses.
+        """
+        return _prepare_command(
+            broker,
+            program,
+            args,
+            cwd,
+            timeout_seconds,
+            find_repo_root(),
+        )
+
+    @tool(name="get_execution_result")
+    def get_execution_result_bound(plan_id: str) -> dict[str, Any]:
+        """Read the stored result of a previously prepared execution plan.
+
+        Purely read-only: this tool can never execute a command. Use it to
+        fetch the exit code and output of a plan after the user approved and
+        the host executed it, or to check whether a plan is still pending.
+
+        Args:
+            plan_id: Identifier returned by prepare_command.
+
+        Returns:
+            {'ok': True, 'executed': True, 'exit_code', 'stdout', ...} when a
+            result exists, {'ok': True, 'executed': False, 'status', ...} for
+            plans without results, or {'ok': False, 'error'} for unknown ids.
+        """
+        return _get_execution_result(broker, plan_id)
+
+    return (prepare_command_bound, get_execution_result_bound)

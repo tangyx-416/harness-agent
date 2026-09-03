@@ -81,7 +81,7 @@ def test_create_agent_registers_all_v03_tools():
 
 
 def test_create_agent_registers_all_v04_tools():
-    """v0.4.0: exactly eleven agent-visible tools including Git tools."""
+    """v0.4.0: all eleven historical tools remain present in v0.5.0."""
     config = AgentConfig(api_key="test-key", model_id="gpt-4", base_url=None)
     with patch("harness_agent.agent.OpenAIModel"), patch(
         "harness_agent.agent.Agent"
@@ -106,8 +106,8 @@ def test_create_agent_registers_all_v04_tools():
         "git_log",
         "git_branches",
     }
-    assert tool_names == expected
-    assert len(tools) == 11
+    assert expected <= tool_names
+    assert len(tools) == 15
 
     # No Git mutation / generic git interface may be exposed.
     assert tool_names.isdisjoint(MUTATION_TOOL_NAMES)

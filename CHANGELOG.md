@@ -5,6 +5,44 @@ All notable changes to the Harness Project Agent will be documented in this file
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] - 2026-09-01
+
+### Added
+
+- Ephemeral, per-process `SessionState` with an isolated session id and UTC timestamps
+- Frozen `TaskPlan`, `TaskStep` and `SessionEvent` models
+- Structured multi-step task planning and progress tracking through `create_task_plan`, `get_task_state`, `update_task_step` and `add_task_steps`
+- Fixed task-step status machine, automatically derived task status and atomic plan revisions
+- Dynamic append-only plan refinement with stable step ids and no history deletion/reordering
+- Bounded state: 20 tasks, 20 steps per task, 200 retained events, bounded text fields and at most 20 recent events per default snapshot
+- Thread-safe state mutation with `RLock`, immutable replacement updates and snapshot isolation
+- Host-verified `execution_approved`, `execution_rejected` and `execution_completed` session events
+- Deterministic session-planning smoke script and state/tool/concurrency/authority integration tests
+- Agent factory support for an explicit `session_state`, with a fresh private state by default
+- Test coverage increased from the 344-test v0.4.0 baseline to 423 deterministic tests
+
+### Safety
+
+- Task state is descriptive metadata and grants no execution, approval, Git, filesystem or network authority
+- The v0.3.0 host-side approval boundary remains unchanged: model proposes, policy validates, user approves, host executes
+- Git remains read-only; task text cannot enable Git mutation or bypass the execution policy
+- Session state is in memory only: no files, database, cross-process persistence, background execution or separate Planner Agent
+- Task notes are concise user-visible records, never private chain-of-thought or hidden reasoning
+- Session events never retain raw stdout/stderr, environment variables, credentials, raw source, or full diffs
+- Goals, steps, notes and events are treated as untrusted session data, never instructions or authorization
+
+### Fixed (Release Audit 指令7)
+
+- **ExecutionBroker isolation**: the agent factory's `prepare_command` / `get_execution_result` tools are now closure-bound to a single per-agent `ExecutionBroker` (`make_execution_tools`) instead of the process-global `get_default_broker()`. Two Agent instances in one process now share no execution plans, results, or pending queues - zero cross-session visibility, and each CLI runtime only approves/processes its own plans. `create_agent` accepts an optional `execution_broker`; the CLI threads one explicit broker/state pair end to end. The `get_default_broker()` compatibility helper is retained for existing v0.3/v0.4 callers, but `create_agent` no longer depends on it.
+- **Completed task is terminal for `add_task_steps`**: a plan whose derived status is `completed` cannot be silently reopened by appending steps; new work must be a new task plan. `blocked` tasks may still accept added steps.
+- **Active-task semantics documented**: `active_task_id` is the most recently created/selected task and may still point at a terminal task; `get_task_state` reports `active_task.status == "completed"` explicitly rather than implying it is unfinished. No auto-scheduling was added.
+- **Step-transition atomicity regression test**: two competing same-step transitions (e.g. `pending→completed` vs `pending→blocked`) are serialized under the lock - only one legal transition based on the true current state succeeds.
+- **Revision atomicity regression tests**: a successful mutation bumps the revision by exactly +1; a failed mutation (invalid transition, unknown step, too many steps, blank note) leaves the revision unchanged - revision is never incremented before validation.
+- **Event sequence monotonicity regression tests**: >200 events still yield strictly-increasing, unique `seq` values (an independent `_next_event_seq` counter, not `len(events)+1`), with correct retained/dropped counts.
+- **Context-bound `get_task_state`**: the default view returns the active task, task *summaries* (no full 20-step bodies for every task) and at most 20 recent events; a full step list is returned only for an explicit `task_id`. Stress test (20 tasks x 20 steps x 200 events) stays well under a bound on the default serialized view. A `RuntimeContext` abstraction was deliberately **not** added.
+- **Secret semantics made precise**: README now states the framework "does not automatically ingest or retain host credentials" (a caller may still *explicitly* place arbitrary text into a goal/step/note/event) instead of the over-broad "never stores API keys".
+- Test coverage increased from 423 to 454 with session-isolation, bounds, and audit regression tests.
+
 ## [0.4.0] - 2026-09-01
 
 ### Added

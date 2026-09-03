@@ -1,12 +1,12 @@
 # Harness Project Agent
 
-**Version: 0.4.0** | **Status: Read-Only Git Awareness**
+**Version: 0.5.0** | **Status: Ephemeral Session State & Structured Task Planning**
 
-A Single-Agent MVP built on the Strands Agents SDK, designed to help analyze and understand code repositories through natural language interaction, to explain the repository's local Git state, diffs, history and branches (read-only), and to request (never perform) whitelisted command execution under explicit human approval.
+A Single-Agent MVP built on the Strands Agents SDK, designed to analyze code repositories, explain local Git state (read-only), request whitelisted command execution under explicit human approval, and track structured progress for multi-step tasks within one CLI process.
 
 ## Overview
 
-This project implements a conversational AI agent that can safely browse, read, search, and understand a code repository, and - since v0.4.0 - reason about its local Git state and history. In v0.3.0 the agent gained the ability to *request* controlled execution of a tiny development-command allowlist. The core security model is:
+This project implements a conversational AI agent that can safely browse, read, search, and understand a code repository. v0.3.0 added requests for controlled execution, v0.4.0 added local read-only Git awareness, and v0.5.0 adds bounded, structured task progress in ephemeral memory. The core security model remains:
 
 > LLM proposes. Policy validates. User approves. Host executes.
 
@@ -14,6 +14,10 @@ Git Awareness is NOT Git Authority:
 
 > Repository read: YES. Git read: YES. Controlled test run: YES (with approval).
 > Source write: NO. Git mutation: NO. Git network: NO.
+
+Task State is NOT Permission:
+
+> Plans organize work. They cannot approve or execute it, enable Git/source mutation, or bypass any tool policy.
 
 ## Architecture
 
@@ -36,6 +40,11 @@ Strands Agent
  │    Git Read Service (hardened fixed argv)
  │         ↓
  │    Local Repository Metadata
+ ├── Structured Task State (IN MEMORY ONLY)
+ │    ├── create_task_plan
+ │    ├── get_task_state
+ │    ├── update_task_step
+ │    └── add_task_steps
  └── prepare_command
       ↓
  Execution Policy (strict allowlist)
@@ -55,12 +64,13 @@ The agent uses a simple but extensible architecture:
 - **Repository Tools**: Read-only Python functions; every path is confined to the repository root via a shared safety module (`path_utils`)
 - **Git Awareness Tools**: Read-only Git introspection with fixed hardened argv; the model provides semantic parameters (scope/path/limit), never a Git subcommand
 - **Execution Layer**: The model can only *prepare* execution plans (`prepare_command`); validation, approval and subprocess execution live in the trusted host layer (`harness_agent.execution` + CLI). Execution is never automatically approved.
+- **Session State**: One explicit, thread-safe `SessionState` per CLI process stores immutable task/step snapshots and bounded metadata events. It is separate from Strands conversation history and never persists.
 - **System Prompt**: Defines the agent's behavior, tool strategy, Git evidence rules, execution state semantics, and anti-hallucination rules
 
 ## Requirements
 
 - **Python**: >= 3.10 (tested with Python 3.11)
-- **Strands Agents SDK**: 1.52.0+
+- **Strands Agents SDK**: 1.53.0+
 - **OpenAI SDK**: For model provider
 
 ## Installation
@@ -141,7 +151,8 @@ python scripts/run_agent.py
 Example interaction:
 ```text
 ============================================================
-Harness Agent v0.3
+Harness Agent v0.5
+Session state: ephemeral (cleared when this CLI exits).
 Type 'exit' or 'quit' to stop, Ctrl+C to interrupt.
 ============================================================
 
@@ -204,9 +215,67 @@ Agent > [git_log(limit=5) → answer]
 
 You > Commit these changes.
 
-Agent > Git mutation is not supported in v0.4.0.
+Agent > Git mutation is not supported in v0.5.0.
         I can inspect the status and diff instead.
 ```
+
+## Session State
+
+Each CLI process owns an isolated in-memory `SessionState`. Strands still maintains conversation history as user/assistant/tool messages; task state is separate structured metadata describing the current goal and observable progress.
+
+Session state stores:
+
+- task goals and ordered task steps
+- fixed progress statuses (`pending`, `in_progress`, `completed`, `blocked`, `skipped`)
+- concise user-visible notes
+- bounded task and host-verified execution lifecycle events
+
+It intentionally does **not automatically ingest or retain** host credentials, environment variables, raw file contents, full diffs, raw execution stdout/stderr, complete chat transcripts, private chain-of-thought, user profiles, embeddings, or long-term memory. (Because goals, steps, notes and events are user/model-supplied text, a caller could *explicitly* put arbitrary text in them; the guarantee is that the framework never *automatically* captures host internals such as environment, command output, or credentials into session state.) Restarting `python scripts/run_agent.py` creates a new empty task session; state does not survive CLI restart.
+
+Each CLI runtime owns **one explicit `SessionState` and one explicit `ExecutionBroker`**; the agent factory binds its task tools to the state and its execution-request tools to the broker. Two agents in the same process therefore share no task state and no execution plans/results - there is zero cross-session visibility, and each CLI only approves/processes its own pending plans.
+
+Limits are explicit: 20 tasks per session, 20 steps per task, 200 retained events, 500 characters per goal, 300 per step, 1000 per note, and 500 per event summary. `get_task_state` returns no more than 20 recent events. When the event deque evicts old entries, the snapshot exposes `events_truncated` and `dropped_event_count`; tasks are never silently deleted.
+
+## Task Planning Strategy
+
+Simple one-step questions should use the necessary tool directly. Multi-step work, work that can become blocked, or work interrupted by execution approval should use a concise task plan. Plan status is derived from step status; the Agent cannot directly declare an incomplete task completed.
+
+Example:
+
+```text
+You > Inspect the current changes, verify the implementation,
+      run focused tests if needed, and tell me what remains.
+
+Agent creates a plan:
+1. Inspect Git state
+2. Review relevant diff
+3. Inspect affected source
+4. Run focused tests
+5. Summarize remaining issues
+
+git_status                 -> step 1 completed
+git_diff / read_file       -> steps 2 and 3 completed
+prepare_command(pytest ...) -> step 4 in_progress; awaiting approval
+user approval              -> host executes
+next Agent turn            -> get_execution_result, then update step 4
+```
+
+Planning remains descriptive. Only the host-side `[y/N]` flow approves a prepared command. A plan or note saying “approved” has no authority, and a plan step saying “commit changes” cannot enable Git mutation.
+
+Legal step transitions are:
+
+- `pending → in_progress | completed | blocked | skipped`
+- `in_progress → pending | completed | blocked | skipped`
+- `blocked → pending | in_progress | skipped`
+- `completed` and `skipped` are terminal
+
+`task_created`, `task_steps_added` and `task_step_updated` events describe Agent-managed task metadata. `execution_approved`, `execution_rejected` and `execution_completed` are recorded only by the CLI host. Execution events never change a task step automatically because the host does not guess which execution belongs to which step.
+
+The **active task is by definition the most recently created/selected task**, not necessarily an unfinished one: `active_task_id` keeps pointing at the last selected task even after it becomes `terminal`. `get_task_state` reports `active_task.status == "completed"` plainly rather than implying it is still underway. There is no background scheduler that auto-switches to another task.
+
+A **completed task is terminal for `add_task_steps`**: once its derived status is `completed` (every unfinished step is `completed` or `skipped`), appending new steps is refused so a "Task plan completed" claim stays stable - newly discovered work belongs in a *new* task plan. A task with `blocked` steps is never `completed`, so a `blocked` task may still accept added steps (e.g. to investigate the blocker).
+
+Task-plan state is **in-memory and ephemeral** in the same way as Strands conversation messages: both exist only for the current Agent/CLI process and are gone when it exits. There is no persistent SessionManager or message store in this project.
 
 ## Execution Safety Model
 
@@ -255,7 +324,7 @@ Verified empirically on Git 2.48.1 (and enforced by argv/env contract tests): re
 
 Residual Git config semantics (documented honestly): repository-local config - including `[include]` / `includeIf` expansion - is still read by Git for ordinary read-operation behavior. Because the hardened command-line `-c` values and flags take precedence over every config source and no mutation/network subcommand can ever be composed, includes cannot breach the mutation/network boundary; they remain a residual *semantic* influence on display formatting only.
 
-**No Git mutation tools are available in v0.4.0.** Git data (commit messages, diffs, filenames, branch names) is treated as untrusted repository data - never as instructions or authorization.
+**No Git mutation tools are available in v0.5.0.** Git data (commit messages, diffs, filenames, branch names) is treated as untrusted repository data - never as instructions or authorization.
 
 ## Important Limitation
 
@@ -281,6 +350,11 @@ commands.
 `origin/main` and ahead/behind values are locally stored remote-tracking
 information - not live GitHub state.
 
+v0.5.0 state is not long-term memory. There is no cross-process persistence,
+autonomous background execution, workflow engine, separate Planner Agent,
+multi-agent system, source editing, Git mutation/network, package installation,
+OS sandbox, guaranteed process-tree termination, persistent audit log, or web UI.
+
 ## Testing
 
 Run the test suite:
@@ -301,7 +375,7 @@ Run with coverage:
 pytest --cov=harness_agent
 ```
 
-## Current Features (v0.4.0)
+## Current Features (v0.5.0)
 
 - ✅ **Single Strands Agent**: One conversational agent with clear responsibilities
 - ✅ **OpenAI-Compatible Models**: Works with OpenAI, local vLLM, and other compatible endpoints
@@ -312,20 +386,24 @@ pytest --cov=harness_agent
 - ✅ **Dependency Analysis**: pyproject.toml / requirements*.txt / package.json (`analyze_dependencies`)
 - ✅ **Read-Only Git Awareness**: status, diff, log, branches with hardened fixed argv (`git_status` / `git_diff` / `git_log` / `git_branches`)
 - ✅ **User-Approved Execution**: `prepare_command` requests, policy validates, user approves, host executes
+- ✅ **Structured Task Planning**: Four state-only tools track multi-step progress without adding authority
+- ✅ **Ephemeral Session State**: Per-process isolation, immutable models, `RLock`, bounded tasks/steps/events
+- ✅ **Host-Verified Session Events**: Approval/rejection/completion metadata without raw execution output
 - ✅ **Execution Policy**: Strict allowlist, per-flag validation, shell-syntax rejection
 - ✅ **Bounded Streaming Capture**: stdout/stderr drained while the child runs; only the first 64 KB per stream is retained (memory-bounded)
 - ✅ **Read-Only Repository Boundary**: Path confinement, sensitive file blocking, binary detection, output limits
 - ✅ **CLI Interface**: Interactive terminal-based conversation with an execution approval prompt
 - ✅ **Configuration Management**: Environment-based config with validation
-- ✅ **Deterministic Tests**: 320 passing tests with mocked/fake dependencies
+- ✅ **Deterministic Tests**: 423 passing tests with mocked/fake dependencies
 
 ### Verification Status
 
-- **Tests**: 320/320 deterministic/mock tests passing
+- **Tests**: 454/454 deterministic/mock tests passing (v0.4.0 baseline: 344/344)
 - **SDK Integration**: Verified locally with Strands Agents 1.53.0
 - **Execution Smoke**: `scripts/smoke_execution.py` - 35/35 checks passing (host-level, no API key needed)
 - **Repository Smoke**: `scripts/smoke_repo_tools.py` passing (v0.2 regression)
 - **Git Awareness Smoke**: `scripts/smoke_git_awareness.py` - 21/21 checks passing on the real repository (read-only before/after proof)
+- **Session Planning Smoke**: `scripts/smoke_session_planning.py` - 13/13 checks passing (no LLM or API key) including broker isolation and completed-task terminal checks
 - **Real LLM Execution**: Requires a valid OpenAI API key
 - **Live API Smoke Test**: Has not yet been performed in this environment
 
@@ -367,18 +445,24 @@ Harness Agent/
 │       │   ├── models.py               # GitStatus / GitCommit / GitBranch
 │       │   ├── parsers.py              # porcelain v2 / log / for-each-ref parsers
 │       │   └── service.py              # Hardened read-only Git service
+│       ├── session/
+│       │   ├── __init__.py             # Session model/state exports
+│       │   ├── models.py               # Frozen TaskPlan / TaskStep / SessionEvent
+│       │   └── state.py                # Thread-safe bounded in-memory SessionState
 │       └── tools/
 │           ├── __init__.py
 │           ├── path_utils.py           # Shared path-safety module
 │           ├── project_tools.py        # inspect_project (root-confined)
 │           ├── repository_tools.py     # list_directory / read_file / search_code / analyze_dependencies
 │           ├── execution_tools.py      # prepare_command / get_execution_result
-│           └── git_tools.py            # git_status / git_diff / git_log / git_branches
+│           ├── git_tools.py            # git_status / git_diff / git_log / git_branches
+│           └── task_tools.py           # Four SessionState-bound planning tools
 ├── scripts/
 │   ├── run_agent.py                    # CLI entry point + approval prompt
 │   ├── smoke_repo_tools.py             # Manual tool/security smoke script (v0.2)
 │   ├── smoke_execution.py              # Execution/security smoke script (v0.3)
-│   └── smoke_git_awareness.py          # Git awareness/read-only smoke script (v0.4)
+│   ├── smoke_git_awareness.py          # Git awareness/read-only smoke script (v0.4)
+│   └── smoke_session_planning.py       # Deterministic session planning smoke (v0.5)
 ├── tests/
 │   ├── test_agent_factory.py           # Agent factory + tool registration tests
 │   ├── test_cli.py                     # CLI tests
@@ -394,6 +478,10 @@ Harness Agent/
 │   ├── test_git_status.py              # Status parsing/lifecycle tests
 │   ├── test_git_tools.py               # Git tool surface tests
 │   ├── test_repository_tools.py        # Repository tool tests
+│   ├── test_session_execution_events.py # Host execution-event integration
+│   ├── test_session_state.py            # State model, limits and concurrency tests
+│   ├── test_task_planning.py             # Planning/authority integration tests
+│   ├── test_task_tools.py                # Closure binding and task tool tests
 │   ├── test_tools.py                   # inspect_project tests
 │   └── git_test_utils.py               # Disposable tmp git repo helpers
 ├── .env.example                        # Example environment configuration
@@ -406,16 +494,16 @@ Harness Agent/
 
 ## Roadmap
 
-v0.2.0 delivered the Repository Understanding layer; v0.3.0 delivered User-Approved Safe Execution; v0.4.0 delivered Read-Only Git Awareness. Future versions will add:
+v0.2.0 delivered Repository Understanding; v0.3.0 delivered User-Approved Safe Execution; v0.4.0 delivered Read-Only Git Awareness; v0.5.0 delivers ephemeral Structured Task Planning. Possible future work includes:
 
-- **v0.5**: Memory system (conversation history, learned facts)
-- **v0.6**: Planning capabilities (multi-step task decomposition)
-- **v0.7**: Multi-agent coordination (specialist agents for different tasks)
+- opt-in persistence with an explicit privacy and retention design
+- richer planning UX without autonomous execution
+- optional coordination only after authority boundaries are designed
 - **v1.0**: Full Agent Harness (orchestration, monitoring, evaluation)
 
 ## Development Status
 
-**v0.4.0 is the current development baseline.**
+**v0.5.0 is the current development baseline.**
 
 ### Implemented
 
@@ -427,9 +515,11 @@ v0.2.0 delivered the Repository Understanding layer; v0.3.0 delivered User-Appro
 - Read-only safety boundary
 - Read-only Git awareness (status/diff/log/branches, hardened argv, no network)
 - User-approved constrained execution (allowlist + policy + approval + host service)
+- Ephemeral structured task planning with bounded progress events
+- Per-agent ExecutionBroker isolation with zero cross-session leakage
 - CLI interface with execution approval prompt
 - Environment configuration
-- 320 deterministic tests
+- 454 deterministic tests
 
 ### Not Implemented
 
@@ -439,8 +529,8 @@ v0.2.0 delivered the Repository Understanding layer; v0.3.0 delivered User-Appro
 - Git mutation (add/commit/push/checkout/reset/merge/rebase/clean)
 - Git network operations (fetch/pull/push/clone/ls-remote)
 - OS-level sandboxing
-- Memory system
-- Planning capabilities
+- Persistent cross-session memory
+- Autonomous/separate Planner Agent or workflow engine
 - Multi-Agent orchestration
 - Web UI
 - Persistent audit log
@@ -483,7 +573,16 @@ Test the following interactions:
    You > What files have changed and what branch am I on?
    ```
    Expected: the agent uses `git_status` (and optionally `git_diff`),
-   reports local Git state, and never mutates anything.
+    reports local Git state, and never mutates anything.
+
+6. **Structured planning**:
+   ```
+   You > Inspect the latest repository changes, make a short plan,
+         run a focused test if needed, and tell me what remains.
+   ```
+   Expected: the Agent creates a concise plan, updates observable inspection
+   steps, prepares (but does not run) a test command, and waits for host-side
+   approval. Rejection must never mark the test step completed.
 
 **Note**: This is not part of the automated test suite as it requires a real API key and incurs API costs. All automated tests use mocked dependencies.
 
@@ -544,4 +643,4 @@ This is a personal learning and development project. Feel free to fork and adapt
 
 ---
 
-**Version**: 0.4.0 | **Status**: Active Development (Read-Only Git Awareness) | **Python**: 3.10+
+**Version**: 0.5.0 | **Status**: Active Development (Ephemeral Structured Task Planning) | **Python**: 3.10+

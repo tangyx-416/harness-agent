@@ -58,6 +58,7 @@ def test_cli_agent_invocation_uses_correct_api():
 
                     # Verify agent was called (not agent.chat)
                     mock_agent.assert_called_once_with("test message")
+                    assert "session_state" in mock_create_agent.call_args.kwargs
 
                     # Verify result was converted to string
                     output = mock_stdout.getvalue()

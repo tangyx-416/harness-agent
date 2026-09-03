@@ -8,6 +8,13 @@ v0.3.0: after every agent turn, any pending execution plans prepared by
 the agent are shown to the user with an explicit approval prompt. The
 CLI is the trusted host layer -- the model can never approve or execute
 commands on its own.
+
+v0.5.0: each CLI process owns one explicit ephemeral SessionState and one
+explicit ExecutionBroker. Host-verified approval/rejection/completion
+metadata is recorded in that same state, without retaining stdout, stderr,
+environment data or secrets. The agent's execution-request tools are bound
+to that same broker, so task state, execution plans and execution results
+all belong to one CLI runtime.
 """
 
 import sys
@@ -23,6 +30,7 @@ from harness_agent.execution import (
     execute_approved,
     get_default_broker,
 )
+from harness_agent.session import SessionState
 
 #: Input lines that count as explicit approval. Everything else -- empty
 #: input (Enter), 'n', 'no', random strings -- is a NO. There is no flag
@@ -36,7 +44,8 @@ _RESULT_ECHO_CHARS = 2000
 def print_banner():
     """Print welcome banner."""
     print("=" * 60)
-    print("Harness Agent v0.3")
+    print("Harness Agent v0.5")
+    print("Session state: ephemeral (cleared when this CLI exits).")
     print("Type 'exit' or 'quit' to stop, Ctrl+C to interrupt.")
     print("=" * 60)
     print()
@@ -102,7 +111,10 @@ def _echo_result(result) -> None:
     print("-" * 60)
 
 
-def process_pending_executions(broker: ExecutionBroker | None = None) -> None:
+def process_pending_executions(
+    broker: ExecutionBroker | None = None,
+    session_state: SessionState | None = None,
+) -> None:
     """Show pending plans to the user and run the approved ones.
 
     This is the trusted host layer: approval decisions are made here by
@@ -112,14 +124,27 @@ def process_pending_executions(broker: ExecutionBroker | None = None) -> None:
     for plan in broker.pending():
         if not request_approval(plan):
             broker.reject(plan.id)
+            if session_state is not None:
+                session_state.record_execution_rejected(plan.id)
             print("Execution cancelled: nothing was run.\n")
             continue
         try:
             broker.approve(plan.id)
+            if session_state is not None:
+                session_state.record_execution_approved(plan.id)
             result = execute_approved(broker, plan.id)
         except Exception as exc:  # broker/service guard; never crash the CLI
             print(f"Execution error: {exc}\n")
             continue
+        if session_state is not None:
+            session_state.record_execution_completed(
+                plan.id,
+                exit_code=result.exit_code,
+                timed_out=result.timed_out,
+                duration_ms=result.duration_ms,
+                stdout_truncated=result.stdout_truncated,
+                stderr_truncated=result.stderr_truncated,
+            )
         _echo_result(result)
 
 
@@ -128,7 +153,13 @@ def main():
     # Load configuration and create agent
     try:
         config = AgentConfig.from_env()
-        agent = create_agent(config)
+        session_state = SessionState()
+        execution_broker = ExecutionBroker()
+        agent = create_agent(
+            config,
+            session_state=session_state,
+            execution_broker=execution_broker,
+        )
     except ValueError as e:
         print(f"Configuration Error: {e}", file=sys.stderr)
         print("\nPlease ensure your .env file is configured correctly.", file=sys.stderr)
@@ -164,7 +195,10 @@ def main():
 
                 # v0.3.0: the agent may have prepared execution plans.
                 # The user approves/rejects them here, in the host layer.
-                process_pending_executions()
+                # v0.5.0: this CLI's own broker is used, never a shared one.
+                process_pending_executions(
+                    broker=execution_broker, session_state=session_state
+                )
 
             except KeyboardInterrupt:
                 print("\n\n(Interrupted)")

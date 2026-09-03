@@ -8,6 +8,7 @@ import pytest
 
 from harness_agent.agent import create_agent, load_system_prompt
 from harness_agent.config import AgentConfig
+from harness_agent.session import SessionState
 
 
 def test_load_system_prompt_success():
@@ -185,6 +186,81 @@ def test_create_agent_registers_all_v03_tools():
             "get_execution_result",
         }
         assert expected <= tool_names, f"missing tools: {expected - tool_names}"
+
+
+def test_create_agent_registers_exactly_fifteen_v05_tools():
+    """v0.5.0 exposes exactly 15 tools; host operations remain hidden."""
+    config = AgentConfig(api_key="test-key", model_id="gpt-4", base_url=None)
+
+    with patch("harness_agent.agent.OpenAIModel"), patch(
+        "harness_agent.agent.Agent"
+    ) as mock_agent_class:
+        mock_agent_class.return_value = Mock()
+        create_agent(config, session_state=SessionState())
+
+    tools = mock_agent_class.call_args.kwargs["tools"]
+    tool_names = [
+        getattr(item, "tool_name", getattr(item, "__name__", ""))
+        for item in tools
+    ]
+    assert len(tools) == 15
+    assert len(set(tool_names)) == 15
+    assert set(tool_names) == {
+        "inspect_project",
+        "list_directory",
+        "read_file",
+        "search_code",
+        "analyze_dependencies",
+        "git_status",
+        "git_diff",
+        "git_log",
+        "git_branches",
+        "prepare_command",
+        "get_execution_result",
+        "create_task_plan",
+        "get_task_state",
+        "update_task_step",
+        "add_task_steps",
+    }
+    assert not ({"approve", "reject", "execute", "execute_task"} & set(tool_names))
+
+
+def test_create_agent_task_tools_bind_explicit_session_state():
+    config = AgentConfig(api_key="test-key", model_id="gpt-4", base_url=None)
+    state = SessionState()
+
+    with patch("harness_agent.agent.OpenAIModel"), patch(
+        "harness_agent.agent.Agent"
+    ) as mock_agent_class:
+        mock_agent_class.return_value = Mock()
+        create_agent(config, session_state=state)
+
+    tools = {
+        getattr(item, "tool_name", getattr(item, "__name__", "")): item
+        for item in mock_agent_class.call_args.kwargs["tools"]
+    }
+    created = tools["create_task_plan"]("Bound task", ["Step"])
+    assert created["session_id"] == state.session_id
+    assert state.snapshot()["active_task"]["goal"] == "Bound task"
+
+
+def test_create_agent_default_sessions_are_private():
+    config = AgentConfig(api_key="test-key", model_id="gpt-4", base_url=None)
+
+    with patch("harness_agent.agent.OpenAIModel"), patch(
+        "harness_agent.agent.Agent"
+    ) as mock_agent_class:
+        mock_agent_class.return_value = Mock()
+        create_agent(config)
+        first_tools = mock_agent_class.call_args.kwargs["tools"]
+        create_agent(config)
+        second_tools = mock_agent_class.call_args.kwargs["tools"]
+
+    first = {item.tool_name: item for item in first_tools if hasattr(item, "tool_name")}
+    second = {item.tool_name: item for item in second_tools if hasattr(item, "tool_name")}
+    first["create_task_plan"]("Only first", ["Step"])
+    assert first["get_task_state"]()["session"]["task_count"] == 1
+    assert second["get_task_state"]()["session"]["task_count"] == 0
 
 
 def test_create_agent_with_missing_api_key():

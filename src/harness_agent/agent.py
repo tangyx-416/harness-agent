@@ -7,7 +7,9 @@ from strands import Agent, tool
 from strands.models.openai import OpenAIModel
 
 from .config import AgentConfig, get_prompts_dir
-from .tools.execution_tools import get_execution_result, prepare_command
+from .execution import ExecutionBroker
+from .session import SessionState
+from .tools.execution_tools import make_execution_tools
 from .tools.git_tools import (
     git_branches_tool,
     git_diff_tool,
@@ -21,6 +23,7 @@ from .tools.repository_tools import (
     read_file,
     search_code,
 )
+from .tools.task_tools import make_task_tools
 
 
 def load_system_prompt() -> str:
@@ -36,7 +39,11 @@ def load_system_prompt() -> str:
     return prompt_path.read_text(encoding="utf-8")
 
 
-def create_agent(config: AgentConfig | None = None) -> Agent:
+def create_agent(
+    config: AgentConfig | None = None,
+    session_state: SessionState | None = None,
+    execution_broker: ExecutionBroker | None = None,
+) -> Agent:
     """Create and configure a Harness Agent.
 
     This factory function:
@@ -44,10 +51,16 @@ def create_agent(config: AgentConfig | None = None) -> Agent:
     2. Initializes the OpenAI model
     3. Loads the system prompt
     4. Registers available tools
-    5. Creates and returns the Agent instance
+    5. Binds task-state tools to one isolated in-memory session
+    6. Binds execution-request tools to one isolated in-memory broker
+    7. Creates and returns the Agent instance
 
     Args:
         config: Optional configuration. If not provided, loads from environment.
+        session_state: Optional explicit ephemeral task state. A fresh private
+            state is created when omitted.
+        execution_broker: Optional explicit execution broker. A fresh private
+            broker is created when omitted.
 
     Returns:
         Agent: Configured agent ready to process requests
@@ -78,6 +91,18 @@ def create_agent(config: AgentConfig | None = None) -> Agent:
     # Load system prompt
     system_prompt = load_system_prompt()
 
+    # v0.5.0: every factory call owns an isolated task state unless the host
+    # explicitly supplies one. This is intentionally separate from Strands'
+    # conversation history and persistence-oriented SessionManager APIs.
+    bound_session_state = session_state or SessionState()
+    task_tools = make_task_tools(bound_session_state)
+
+    # v0.5.0: every factory call owns an isolated execution broker unless the
+    # host explicitly supplies one. This prevents cross-agent plan leakage
+    # when two Agent instances coexist in the same process.
+    bound_broker = execution_broker or ExecutionBroker()
+    exec_prepare, exec_result = make_execution_tools(bound_broker)
+
     # Create tool - Strands @tool decorator makes functions into tools.
     # The public model-facing name is 'inspect_project' (matches docs and
     # the other repository tools); the Python wrapper keeps a distinct name.
@@ -107,6 +132,9 @@ def create_agent(config: AgentConfig | None = None) -> Agent:
     # approval and subprocess execution stay in the trusted host layer.
     # v0.4.0: git_status / git_diff / git_log / git_branches add READ-ONLY
     # Git awareness -- fixed introspection argv, no mutation, no network.
+    # v0.5.0: four closure-bound task tools and two closure-bound execution
+    # tools mutate only the explicit, process-local SessionState and broker.
+    # They add no execution or mutation authority.
     agent = Agent(
         model=model,
         system_prompt=system_prompt,
@@ -116,12 +144,13 @@ def create_agent(config: AgentConfig | None = None) -> Agent:
             read_file,
             search_code,
             analyze_dependencies,
-            prepare_command,
-            get_execution_result,
+            exec_prepare,
+            exec_result,
             git_status_tool,
             git_diff_tool,
             git_log_tool,
             git_branches_tool,
+            *task_tools,
         ],
         name="HarnessAgent",
         description="A project repository assistant agent",
