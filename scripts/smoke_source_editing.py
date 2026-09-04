@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Host-level smoke tests for v0.6.0 User-Approved Source Editing.
+"""Host-level smoke tests for v0.7.0 User-Approved Source Editing.
 
 Runs WITHOUT any LLM API access. It exercises the exact production path:
 policy validates -> pending immutable PatchPlan -> COMPLETE diff -> host asks
@@ -13,7 +13,7 @@ Checks:
   D. reject            -> ZERO write, status rejected
   E. conflict          -> file changed after prepare -> conflict, no write
   F. policy denials    -> unsupported op / overlapping / unsafe path / .env
-  G. tool surface      -> 17 tools include prepare_patch + get_patch_result
+  G. tool surface      -> 20 tools include prepare_patch + get_patch_result
 """
 
 import io
@@ -191,7 +191,7 @@ def main() -> int:
         getattr(t, "tool_name", getattr(t, "__name__", ""))
         for t in mac.call_args.kwargs["tools"]
     ]
-    check("G1 17 tools", len(names) == 17)
+    check("G1 20 tools", len(names) == 20)
     check("G2 patch tools present",
           "prepare_patch" in names and "get_patch_result" in names)
     check("G3 host ops hidden",

@@ -1,12 +1,12 @@
 # Harness Project Agent
 
-**Version: 0.6.0** | **Status: User-Approved Source Editing & Patch Broker**
+**Version: 0.7.0** | **Status: User-Approved Git Stage & Commit**
 
-A Single-Agent MVP built on the Strands Agents SDK, designed to analyze code repositories, explain local Git state (read-only), request whitelisted command execution under explicit human approval, propose precise user-approved single-file source edits, and track structured progress for multi-step tasks within one CLI process.
+A Single-Agent MVP built on the Strands Agents SDK, designed to analyze code repositories, explain local Git state (read-only), request whitelisted command execution under explicit human approval, propose precise user-approved single-file source edits, propose user-approved Git stage and commit operations, and track structured progress for multi-step tasks within one CLI process.
 
 ## Overview
 
-This project implements a conversational AI agent that can safely browse, read, search, and understand a code repository. v0.3.0 added requests for controlled execution, v0.4.0 added local read-only Git awareness, v0.5.0 adds bounded, structured task progress in ephemeral memory, and v0.6.0 adds User-Approved Source Editing. The core security model remains:
+This project implements a conversational AI agent that can safely browse, read, search, and understand a code repository. v0.3.0 added requests for controlled execution, v0.4.0 added local read-only Git awareness, v0.5.0 adds bounded, structured task progress in ephemeral memory, v0.6.0 adds User-Approved Source Editing, and v0.7.0 adds User-Approved Git Stage & Commit. The core security model remains:
 
 > LLM proposes. Policy validates. User approves. Host executes.
 
@@ -14,10 +14,14 @@ Source Editing uses the same boundary:
 
 > LLM proposes. Patch Policy validates. User approves. Host applies.
 
+Git Mutation uses the same boundary:
+
+> LLM proposes. Git Policy validates. User approves. Host mutates.
+
 Git Awareness is NOT Git Authority:
 
 > Repository read: YES. Git read: YES. Controlled test run: YES (with approval).
-> Source write: YES (with approval). Git mutation: NO. Git network: NO.
+> Source write: YES (with approval). Git stage/commit: YES (with approval). Git push/tag: NO. Git network: NO.
 
 Task State is NOT Permission:
 
@@ -26,6 +30,10 @@ Task State is NOT Permission:
 Patch Broker is NOT Write Authority:
 
 > `prepare_patch` only proposes immutable edits; only the host applies after user approval.
+
+Git Mutation Broker is NOT Git Authority:
+
+> `prepare_git_stage` and `prepare_git_commit` only propose immutable plans; only the host mutates Git after user approval.
 
 ## Architecture
 
@@ -53,32 +61,39 @@ Strands Agent
  │    ├── get_task_state
  │    ├── update_task_step
  │    └── add_task_steps
-  ├── Structured Task State (IN MEMORY ONLY)
-  │    ├── create_task_plan
-  │    ├── get_task_state
-  │    ├── update_task_step
-  │    └── add_task_steps
-  ├── prepare_command
-  │    ↓
-  │ Execution Policy (strict allowlist)
-  │    ↓
-  │ Pending Execution Plan
-  │    ↓
-  │ User Approval (CLI prompt)          ← trust boundary
-  │    ↓
-  │ Host Execution Service (shell=False)
-  │    ↓
-  │ Execution Result
-  └── prepare_patch
-       ↓
-  Patch Policy (immutable single-file validation)
-       ↓
-  Pending PatchPlan (COMPLETE diff)
-       ↓
+ ├── prepare_command
+ │    ↓
+ │ Execution Policy (strict allowlist)
+ │    ↓
+ │ Pending Execution Plan
+ │    ↓
+ │ User Approval (CLI prompt)          ← trust boundary
+ │    ↓
+ │ Host Execution Service (shell=False)
+ │    ↓
+ │ Execution Result
+ ├── prepare_patch
+ │    ↓
+ │ Patch Policy (immutable single-file validation)
+ │    ↓
+ │ Pending PatchPlan (COMPLETE diff)
+ │    ↓
+ │ User Approval (CLI prompt)           ← trust boundary
+ │    ↓
+ │ Host Patch Service (atomic apply)
+ │    ↓
+ │ Patch Result
+ └── prepare_git_stage / prepare_git_commit
+      ↓
+  Git Mutation Policy (path safety, text-only, no filters)
+      ↓
+  Pending GitStagePlan / GitCommitPlan (COMPLETE diff)
+      ↓
   User Approval (CLI prompt)           ← trust boundary
-       ↓
-  Host Patch Service (atomic apply)
-       ↓
+      ↓
+  Host Git Service (exact blob/commit, no hooks/signing/network)
+      ↓
+  Git Mutation Result
   PatchResult
 ```
 

@@ -20,6 +20,11 @@ v0.6.0: one explicit PatchBroker is added. The agent may PREPARE single-file
 source-edit proposals; the CLI shows the COMPLETE diff and the user approves
 or rejects each one. Only the host applies an approved patch via the patch
 service. Patch plans, results and host events stay isolated to this CLI.
+
+v0.7.0: one explicit GitMutationBroker is added. The agent may PREPARE Git
+stage (single-file) and commit (entire staged snapshot) proposals; the CLI
+shows the COMPLETE diff and the user approves or rejects each one. Only the
+host mutates the Git index or creates local commits. No push.
 """
 
 import sys
@@ -34,6 +39,11 @@ from harness_agent.execution import (
     ExecutionBroker,
     execute_approved,
     get_default_broker,
+)
+from harness_agent.git_mutation import GitMutationBroker
+from harness_agent.git_mutation.service import (
+    apply_approved_commit,
+    apply_approved_stage,
 )
 from harness_agent.patch import (
     PatchBroker,
@@ -55,9 +65,10 @@ _RESULT_ECHO_CHARS = 2000
 def print_banner():
     """Print welcome banner."""
     print("=" * 60)
-    print("Harness Agent v0.6")
+    print("Harness Agent v0.7")
     print("Session state: ephemeral (cleared when this CLI exits).")
     print("Source edits: proposed by the agent, applied only after you approve.")
+    print("Git stage/commit: proposed by the agent, applied only after you approve.")
     print("Type 'exit' or 'quit' to stop, Ctrl+C to interrupt.")
     print("=" * 60)
     print()
@@ -232,6 +243,134 @@ def process_pending_patches(
         print(f"Patch result: {result.status} -- {result.message}\n")
 
 
+def _show_git_stage_proposal(plan) -> None:
+    """Render the COMPLETE diff of one pending stage plan for user review."""
+    print("-" * 60)
+    print("Git stage proposal")
+    print()
+    print(f"Plan ID:  {plan.id}")
+    print(f"Branch:   {plan.branch}")
+    print(f"HEAD:     {plan.head_oid[:8]}")
+    print(f"File:     {render_untrusted_terminal_text(plan.repo_path)}")
+    print(f"Summary:  {render_untrusted_terminal_text(plan.summary)}")
+    print()
+    print("Complete staged diff:")
+    print(render_untrusted_terminal_text(plan.diff) if plan.diff else "(no diff)")
+    print("-" * 60)
+
+
+def _request_stage_approval(plan) -> bool:
+    """Ask the user to approve one stage plan. Only explicit y/yes approves."""
+    _show_git_stage_proposal(plan)
+    try:
+        answer = input("Stage this file? [y/N]: ")
+    except (KeyboardInterrupt, EOFError):
+        print("\n(Cancelled)")
+        return False
+    return answer.strip().lower() in _APPROVAL_WORDS
+
+
+def _show_git_commit_proposal(plan) -> None:
+    """Render the COMPLETE diff of one pending commit plan for user review."""
+    print("-" * 60)
+    print("Git commit proposal")
+    print()
+    print(f"Plan ID:  {plan.id}")
+    print(f"Branch:   {plan.branch}")
+    print(f"Parent:   {plan.head_oid[:8]}")
+    print(f"Author:   {render_untrusted_terminal_text(plan.author_name)} <{render_untrusted_terminal_text(plan.author_email)}>")
+    print()
+    print("Commit message:")
+    print(render_untrusted_terminal_text(plan.message))
+    print()
+    print(f"Staged files ({len(plan.staged_paths)}):")
+    for path in plan.staged_paths[:10]:  # Show first 10
+        print(f"  {render_untrusted_terminal_text(path)}")
+    if len(plan.staged_paths) > 10:
+        print(f"  ... and {len(plan.staged_paths) - 10} more")
+    print()
+    print("Complete commit diff:")
+    print(render_untrusted_terminal_text(plan.diff) if plan.diff else "(no diff)")
+    print()
+    print("NOTE: This does NOT push to any remote.")
+    print("-" * 60)
+
+
+def _request_commit_approval(plan) -> bool:
+    """Ask the user to approve one commit plan. Only explicit y/yes approves."""
+    _show_git_commit_proposal(plan)
+    try:
+        answer = input("Create this local commit? [y/N]: ")
+    except (KeyboardInterrupt, EOFError):
+        print("\n(Cancelled)")
+        return False
+    return answer.strip().lower() in _APPROVAL_WORDS
+
+
+def process_pending_git_mutations(
+    git_mutation_broker: GitMutationBroker,
+    session_state: SessionState | None = None,
+    root=None,
+) -> None:
+    """Show pending Git mutation plans to the user and apply the approved ones.
+
+    This is the trusted host layer: the user approves/rejects each COMPLETE
+    diff here (never the model). Approval authorizes exactly one apply attempt.
+    """
+    if root is None:
+        root = find_repo_root()
+
+    # Process stage plans first
+    for plan in git_mutation_broker.pending_stage_plans():
+        if not _request_stage_approval(plan):
+            git_mutation_broker.reject(plan.id)
+            if session_state is not None:
+                session_state.record_git_stage_rejected(plan.id)
+            print("Stage cancelled: ZERO Git index mutation occurred.\n")
+            continue
+        try:
+            if session_state is not None:
+                session_state.record_git_stage_approved(plan.id)
+            git_mutation_broker.approve(plan.id)
+            result = apply_approved_stage(git_mutation_broker, plan.id, root)
+        except Exception as exc:
+            print(f"Stage apply error: {exc}\n")
+            continue
+        if session_state is not None:
+            if result.status == "applied":
+                session_state.record_git_stage_applied(plan.id, result.path)
+            elif result.status == "conflict":
+                session_state.record_git_stage_conflict(plan.id)
+            else:
+                session_state.record_git_stage_failed(plan.id)
+        print(f"Stage result: {result.status} -- {result.message}\n")
+
+    # Process commit plans after stage plans
+    for plan in git_mutation_broker.pending_commit_plans():
+        if not _request_commit_approval(plan):
+            git_mutation_broker.reject(plan.id)
+            if session_state is not None:
+                session_state.record_git_commit_rejected(plan.id)
+            print("Commit cancelled: ZERO local commit created.\n")
+            continue
+        try:
+            if session_state is not None:
+                session_state.record_git_commit_approved(plan.id)
+            git_mutation_broker.approve(plan.id)
+            result = apply_approved_commit(git_mutation_broker, plan.id, root)
+        except Exception as exc:
+            print(f"Commit apply error: {exc}\n")
+            continue
+        if session_state is not None:
+            if result.status == "applied":
+                session_state.record_git_commit_applied(plan.id, result.commit_oid)
+            elif result.status == "conflict":
+                session_state.record_git_commit_conflict(plan.id)
+            else:
+                session_state.record_git_commit_failed(plan.id)
+        print(f"Commit result: {result.status} -- {result.message}\n")
+
+
 def main():
     """Run the interactive agent CLI."""
     # Load configuration and create agent
@@ -240,11 +379,13 @@ def main():
         session_state = SessionState()
         execution_broker = ExecutionBroker()
         patch_broker = PatchBroker()
+        git_mutation_broker = GitMutationBroker()
         agent = create_agent(
             config,
             session_state=session_state,
             execution_broker=execution_broker,
             patch_broker=patch_broker,
+            git_mutation_broker=git_mutation_broker,
         )
     except ValueError as e:
         print(f"Configuration Error: {e}", file=sys.stderr)
@@ -291,6 +432,14 @@ def main():
                 # host applies anything.
                 process_pending_patches(
                     patch_broker=patch_broker,
+                    session_state=session_state,
+                )
+
+                # v0.7.0: the agent may also have prepared Git mutation plans
+                # (stage and/or commit). The user approves/rejects each COMPLETE
+                # diff here; only the host mutates Git.
+                process_pending_git_mutations(
+                    git_mutation_broker=git_mutation_broker,
                     session_state=session_state,
                 )
 

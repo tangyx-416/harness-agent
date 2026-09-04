@@ -8,9 +8,11 @@ from strands.models.openai import OpenAIModel
 
 from .config import AgentConfig, get_prompts_dir
 from .execution import ExecutionBroker
+from .git_mutation import GitMutationBroker
 from .patch import PatchBroker
 from .session import SessionState
 from .tools.execution_tools import make_execution_tools
+from .tools.git_mutation_tools import make_git_mutation_tools
 from .tools.git_tools import (
     git_branches_tool,
     git_diff_tool,
@@ -46,6 +48,7 @@ def create_agent(
     session_state: SessionState | None = None,
     execution_broker: ExecutionBroker | None = None,
     patch_broker: PatchBroker | None = None,
+    git_mutation_broker: GitMutationBroker | None = None,
 ) -> Agent:
     """Create and configure a Harness Agent.
 
@@ -56,7 +59,9 @@ def create_agent(
     4. Registers available tools
     5. Binds task-state tools to one isolated in-memory session
     6. Binds execution-request tools to one isolated in-memory broker
-    7. Creates and returns the Agent instance
+    7. Binds patch-request tools to one isolated in-memory broker
+    8. Binds Git mutation-request tools to one isolated in-memory broker
+    9. Creates and returns the Agent instance
 
     Args:
         config: Optional configuration. If not provided, loads from environment.
@@ -66,6 +71,8 @@ def create_agent(
             broker is created when omitted.
         patch_broker: Optional explicit patch broker. A fresh private broker is
             created when omitted.
+        git_mutation_broker: Optional explicit Git mutation broker. A fresh
+            private broker is created when omitted.
 
     Returns:
         Agent: Configured agent ready to process requests
@@ -114,6 +121,14 @@ def create_agent(
     bound_patch_broker = patch_broker or PatchBroker()
     patch_prepare, patch_result = make_patch_tools(bound_patch_broker)
 
+    # v0.7.0: every factory call owns an isolated Git mutation broker unless the
+    # host explicitly supplies one. It holds only pending/approved Git mutation
+    # proposals for THIS agent; Git mutations are applied only by the host layer.
+    bound_git_mutation_broker = git_mutation_broker or GitMutationBroker()
+    git_stage, git_commit, git_mutation_result = make_git_mutation_tools(
+        bound_git_mutation_broker
+    )
+
     # Create tool - Strands @tool decorator makes functions into tools.
     # The public model-facing name is 'inspect_project' (matches docs and
     # the other repository tools); the Python wrapper keeps a distinct name.
@@ -148,6 +163,9 @@ def create_agent(
     # They add no execution or mutation authority.
     # v0.6.0: two closure-bound patch tools validate + register pending source
     # edit proposals in the explicit patch broker. They never write files.
+    # v0.7.0: three closure-bound Git mutation tools validate + register pending
+    # Git stage/commit proposals in the explicit Git mutation broker. They never
+    # mutate the Git index or create commits.
     agent = Agent(
         model=model,
         system_prompt=system_prompt,
@@ -166,6 +184,9 @@ def create_agent(
             *task_tools,
             patch_prepare,
             patch_result,
+            git_stage,
+            git_commit,
+            git_mutation_result,
         ],
         name="HarnessAgent",
         description="A project repository assistant agent",

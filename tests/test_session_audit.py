@@ -172,12 +172,14 @@ def test_git_push_step_never_grants_execution_authority():
     assert denied["denied"] is True
     assert broker.pending() == []
 
-    # No git_commit / git_push tool exists anywhere.
+    # No git_push tool exists anywhere. git_commit exists as a proposal tool (not execution).
     from harness_agent.agent import create_agent
 
     source = inspect.getsource(create_agent)
     assert "git_push" not in source
-    assert "git_commit" not in source
+    # v0.7.0: git_commit variable exists, but it's a proposal tool from make_git_mutation_tools
+    # The actual tool is prepare_git_commit (defined in git_mutation_tools.py)
+    assert "make_git_mutation_tools" in source
     assert state.get_task(task.id).status == "blocked"
 
 

@@ -302,6 +302,6 @@ def test_cli_banner_discloses_ephemeral_session_state():
     with patch("sys.stdout", new_callable=StringIO) as output:
         run_agent.print_banner()
     text = output.getvalue().lower()
-    assert "v0.6" in text
+    assert "v0.7" in text
     assert "session state: ephemeral" in text
     assert "source edits" in text

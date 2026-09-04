@@ -529,6 +529,216 @@ class SessionState:
                 reference=clean_plan_id,
             )
 
+    # -- Git mutation session events (v0.7.0) --------------------------------
+
+    def record_git_stage_proposal(
+        self, plan_id: str, path: str, summary: str
+    ) -> SessionEvent:
+        """Record a Git stage proposal as metadata only."""
+        clean_plan_id = self._normalize_reference(plan_id, "plan_id")
+        clean_summary = _normalize_text(summary, field_name="summary", max_chars=MAX_EVENT_SUMMARY_CHARS)
+        event_summary = f"Git stage proposed: {path} - {clean_summary}"
+        with self._lock:
+            return self._append_event_locked(
+                event_type="git_stage_proposal",
+                summary=event_summary[:MAX_EVENT_SUMMARY_CHARS],
+                reference=clean_plan_id,
+            )
+
+    def record_git_stage_approved(self, plan_id: str) -> SessionEvent:
+        """Record a host-verified Git stage approval as metadata only."""
+        clean_plan_id = self._normalize_reference(plan_id, "plan_id")
+        with self._lock:
+            return self._append_event_locked(
+                event_type="git_stage_approved",
+                summary="Git stage approved by the host-side user approval flow.",
+                reference=clean_plan_id,
+            )
+
+    def record_git_stage_rejected(self, plan_id: str) -> SessionEvent:
+        """Record a host-verified Git stage rejection as metadata only."""
+        clean_plan_id = self._normalize_reference(plan_id, "plan_id")
+        with self._lock:
+            return self._append_event_locked(
+                event_type="git_stage_rejected",
+                summary="Git stage rejected by the host-side user approval flow.",
+                reference=clean_plan_id,
+            )
+
+    def record_git_stage_applied(self, plan_id: str, path: str | None = None) -> SessionEvent:
+        """Record a host-verified, successfully applied Git stage as metadata only."""
+        clean_plan_id = self._normalize_reference(plan_id, "plan_id")
+        summary = f"Git stage applied by the host: {path}" if path else "Git stage applied by the host."
+        with self._lock:
+            return self._append_event_locked(
+                event_type="git_stage_applied",
+                summary=summary[:MAX_EVENT_SUMMARY_CHARS],
+                reference=clean_plan_id,
+            )
+
+    def record_git_stage_conflict(self, plan_id: str, reason: str | None = None) -> SessionEvent:
+        """Record a host-verified Git stage conflict (no index mutation) as metadata only."""
+        clean_plan_id = self._normalize_reference(plan_id, "plan_id")
+        if reason:
+            clean_reason = _normalize_text(reason, field_name="reason", max_chars=MAX_EVENT_SUMMARY_CHARS - 50)
+            summary = f"Git stage conflicted: {clean_reason}"
+        else:
+            summary = "Git stage conflicted; no index mutation occurred."
+        with self._lock:
+            return self._append_event_locked(
+                event_type="git_stage_conflict",
+                summary=summary[:MAX_EVENT_SUMMARY_CHARS],
+                reference=clean_plan_id,
+            )
+
+    def record_git_stage_failed(self, plan_id: str, error: str | None = None) -> SessionEvent:
+        """Record a host-verified Git stage failure as metadata only."""
+        clean_plan_id = self._normalize_reference(plan_id, "plan_id")
+        if error:
+            clean_error = _normalize_text(error, field_name="error", max_chars=MAX_EVENT_SUMMARY_CHARS - 50)
+            summary = f"Git stage failed: {clean_error}"
+        else:
+            summary = "Git stage failed; the index was not mutated."
+        with self._lock:
+            return self._append_event_locked(
+                event_type="git_stage_failed",
+                summary=summary[:MAX_EVENT_SUMMARY_CHARS],
+                reference=clean_plan_id,
+            )
+
+    def record_git_commit_proposal(
+        self, plan_id: str, message: str, staged_file_count: int
+    ) -> SessionEvent:
+        """Record a Git commit proposal as metadata only."""
+        clean_plan_id = self._normalize_reference(plan_id, "plan_id")
+        clean_message = _normalize_text(message, field_name="message", max_chars=MAX_EVENT_SUMMARY_CHARS)
+        event_summary = f"Git commit proposed: {staged_file_count} file(s) - {clean_message}"
+        with self._lock:
+            return self._append_event_locked(
+                event_type="git_commit_proposal",
+                summary=event_summary[:MAX_EVENT_SUMMARY_CHARS],
+                reference=clean_plan_id,
+            )
+
+    def record_git_commit_approved(self, plan_id: str) -> SessionEvent:
+        """Record a host-verified Git commit approval as metadata only."""
+        clean_plan_id = self._normalize_reference(plan_id, "plan_id")
+        with self._lock:
+            return self._append_event_locked(
+                event_type="git_commit_approved",
+                summary="Git commit approved by the host-side user approval flow.",
+                reference=clean_plan_id,
+            )
+
+    def record_git_commit_rejected(self, plan_id: str) -> SessionEvent:
+        """Record a host-verified Git commit rejection as metadata only."""
+        clean_plan_id = self._normalize_reference(plan_id, "plan_id")
+        with self._lock:
+            return self._append_event_locked(
+                event_type="git_commit_rejected",
+                summary="Git commit rejected by the host-side user approval flow.",
+                reference=clean_plan_id,
+            )
+
+    def record_git_commit_applied(self, plan_id: str, commit_oid: str | None = None) -> SessionEvent:
+        """Record a host-verified, successfully created Git commit as metadata only."""
+        clean_plan_id = self._normalize_reference(plan_id, "plan_id")
+        summary = f"Git commit created by the host: {commit_oid if commit_oid else 'unknown'}"
+        with self._lock:
+            return self._append_event_locked(
+                event_type="git_commit_applied",
+                summary=summary[:MAX_EVENT_SUMMARY_CHARS],
+                reference=clean_plan_id,
+            )
+
+    def record_git_commit_conflict(self, plan_id: str, reason: str | None = None) -> SessionEvent:
+        """Record a host-verified Git commit conflict (no commit created) as metadata only."""
+        clean_plan_id = self._normalize_reference(plan_id, "plan_id")
+        if reason:
+            clean_reason = _normalize_text(reason, field_name="reason", max_chars=MAX_EVENT_SUMMARY_CHARS - 50)
+            summary = f"Git commit conflicted: {clean_reason}"
+        else:
+            summary = "Git commit conflicted; no local commit was created."
+        with self._lock:
+            return self._append_event_locked(
+                event_type="git_commit_conflict",
+                summary=summary[:MAX_EVENT_SUMMARY_CHARS],
+                reference=clean_plan_id,
+            )
+
+    def record_git_commit_failed(self, plan_id: str, error: str | None = None) -> SessionEvent:
+        """Record a host-verified Git commit failure as metadata only."""
+        clean_plan_id = self._normalize_reference(plan_id, "plan_id")
+        if error:
+            clean_error = _normalize_text(error, field_name="error", max_chars=MAX_EVENT_SUMMARY_CHARS - 50)
+            summary = f"Git commit failed: {clean_error}"
+        else:
+            summary = "Git commit failed; no local commit was created."
+        with self._lock:
+            return self._append_event_locked(
+                event_type="git_commit_failed",
+                summary=summary[:MAX_EVENT_SUMMARY_CHARS],
+                reference=clean_plan_id,
+            )
+
+    def get_git_mutation_events(self) -> list[dict[str, Any]]:
+        """Get all Git mutation events from the session.
+
+        Returns a list of event dicts with 'event' (type), 'plan_id', and other fields.
+        """
+        from datetime import datetime
+
+        with self._lock:
+            git_event_types = {
+                "git_stage_proposal",
+                "git_stage_approved",
+                "git_stage_rejected",
+                "git_stage_applied",
+                "git_stage_conflict",
+                "git_stage_failed",
+                "git_commit_proposal",
+                "git_commit_approved",
+                "git_commit_rejected",
+                "git_commit_applied",
+                "git_commit_conflict",
+                "git_commit_failed",
+            }
+
+            result = []
+            for event in self._events:
+                if event.type in git_event_types:
+                    # Convert ISO 8601 timestamp to Unix timestamp
+                    timestamp_str = event.timestamp.replace('Z', '+00:00')
+                    timestamp = datetime.fromisoformat(timestamp_str).timestamp()
+
+                    event_dict = {
+                        "event": event.type,
+                        "plan_id": event.reference,
+                        "timestamp": timestamp,
+                        "summary": event.summary,
+                    }
+                    # Extract path from summary for stage events
+                    if event.type == "git_stage_proposal" and "Git stage proposed:" in event.summary:
+                        parts = event.summary.split(":", 1)
+                        if len(parts) > 1:
+                            path_and_summary = parts[1].strip()
+                            if " - " in path_and_summary:
+                                path = path_and_summary.split(" - ")[0].strip()
+                                event_dict["path"] = path
+                    elif event.type == "git_stage_applied" and "Git stage applied by the host:" in event.summary:
+                        parts = event.summary.split(":", 1)
+                        if len(parts) > 1:
+                            event_dict["path"] = parts[1].strip()
+                    # Extract commit_oid from summary for commit applied events
+                    elif event.type == "git_commit_applied" and "Git commit created by the host:" in event.summary:
+                        parts = event.summary.split(":", 1)
+                        if len(parts) > 1:
+                            event_dict["commit_oid"] = parts[1].strip()
+
+                    result.append(event_dict)
+
+            return result
+
     def _append_event_locked(
         self,
         *,

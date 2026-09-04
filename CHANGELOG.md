@@ -5,6 +5,43 @@ All notable changes to the Harness Project Agent will be documented in this file
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0] - 2026-09-04
+
+### Added
+
+- **User-Approved Git Stage & Commit**: the agent can now propose Git index mutations (staging files) and local commit creation, following the same security model as source editing: `LLM proposes -> Git Policy validates -> User approves -> Host mutates`
+- Three new agent-visible tools: `prepare_git_stage` (propose single-file staging), `prepare_git_commit` (propose commit from entire staged snapshot), and `get_git_mutation_result` (check plan status)
+- Immutable `GitStagePlan` and `GitCommitPlan` models with complete diff preview (never truncated) and exactly-once apply semantics via `GitMutationBroker`
+- Git mutation policy layer enforcing: safe path validation (reuses patch policy hardening), text-only changes (no binary/delete/rename), no external filters (clean filters DENIED), one file per stage plan, entire staged snapshot per commit, no initial/amend/merge commits, message validation (UTF-8, no control/bidi spoofing)
+- Git mutation service layer with revalidation before mutation, exact approved blob writing, index-only updates (no hooks/signing/editor/pager/maintenance), post-verification of index entries and diffs, and compensation on failure
+- CLI approval UX for stage and commit with complete diff preview and safe terminal rendering
+- Session state now records 10 Git mutation events (proposal/approval/rejection/applied/conflict for both stage and commit) as metadata-only (no diffs stored)
+- `GitMutationBroker` isolated per agent (closure-bound tools, no cross-session visibility), bounded at 200 plans per broker
+- Comprehensive test coverage: 107 new tests added (31 for models/broker, plus policy/service/tools/integration tests), bringing total to 771 tests (658 passed baseline + 107 new + 6 updated)
+- Smoke test script (`scripts/smoke_git_mutation.py`) with 6 end-to-end checks validating broker isolation, exactly-once semantics, policy validation, and agent integration
+
+### Safety
+
+- No arbitrary Git command interface exposed to the agent
+- No `git add .` (one file per stage plan only)
+- No file deletion, rename, or binary staging
+- No amend, tag, or push operations
+- No network operations (local commits only)
+- All Git mutations require explicit user approval with complete diff preview
+- External filters (clean/smudge) are detected and DENIED
+- Hooks, signing, editor, pager, and maintenance are disabled during commit
+- Stage and commit approvals are separate (staging ≠ auto-commit)
+- Exactly-once apply semantics prevent double-mutation
+- HEAD/branch/index state revalidated before every mutation (conflict detection)
+- Post-verification ensures exact blob OID and diff match approval
+
+### Changed
+
+- Agent tool count increased from 17 to 20 (added 3 Git mutation tools)
+- System prompt updated to v0.7.0, role now "User-Approved Git Stage & Commit"
+- CLI banner updated to v0.7.0 with Git mutation disclosure
+- Version bumped to 0.7.0 in `pyproject.toml` and `__init__.py`
+
 ## [0.6.0] - 2026-09-03
 
 ### Added

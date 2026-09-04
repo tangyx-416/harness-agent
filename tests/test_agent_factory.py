@@ -224,8 +224,8 @@ def test_create_agent_registers_exactly_fifteen_v05_tools():
     assert not ({"approve", "reject", "execute", "execute_task"} & set(tool_names))
 
 
-def test_create_agent_registers_exactly_seventeen_v06_tools():
-    """v0.6.0 exposes exactly 17 tools; host operations remain hidden."""
+def test_create_agent_registers_exactly_twenty_v07_tools():
+    """v0.7.0 exposes exactly 20 tools; host operations remain hidden."""
     config = AgentConfig(api_key="test-key", model_id="gpt-4", base_url=None)
 
     with patch("harness_agent.agent.OpenAIModel"), patch(
@@ -239,8 +239,8 @@ def test_create_agent_registers_exactly_seventeen_v06_tools():
         getattr(item, "tool_name", getattr(item, "__name__", ""))
         for item in tools
     ]
-    assert len(tools) == 17
-    assert len(set(tool_names)) == 17
+    assert len(tools) == 20
+    assert len(set(tool_names)) == 20
     assert set(tool_names) == {
         "inspect_project",
         "list_directory",
@@ -259,6 +259,9 @@ def test_create_agent_registers_exactly_seventeen_v06_tools():
         "add_task_steps",
         "prepare_patch",
         "get_patch_result",
+        "prepare_git_stage",
+        "prepare_git_commit",
+        "get_git_mutation_result",
     }
     assert not (
         {
@@ -268,6 +271,11 @@ def test_create_agent_registers_exactly_seventeen_v06_tools():
             "execute_task",
             "apply_patch",
             "approve_patch",
+            "git_add",
+            "git_commit",
+            "git_push",
+            "apply_git_stage",
+            "apply_git_commit",
         }
         & set(tool_names)
     )

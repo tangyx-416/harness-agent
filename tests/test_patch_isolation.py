@@ -191,7 +191,7 @@ def test_git_regression_seventeen_tools():
     tool_names = [
         getattr(item, "tool_name", getattr(item, "__name__", "")) for item in tools
     ]
-    assert len(tools) == 17
+    assert len(tools) == 20
     assert set(tool_names) == {
         "inspect_project",
         "list_directory",
@@ -210,6 +210,9 @@ def test_git_regression_seventeen_tools():
         "add_task_steps",
         "prepare_patch",
         "get_patch_result",
+        "prepare_git_stage",
+        "prepare_git_commit",
+        "get_git_mutation_result",
     }
 
 
@@ -223,5 +226,5 @@ def test_create_agent_default_private_brokers_do_not_crash():
         create_agent(config, session_state=SessionState())
     assert mock_agent_class.call_count == 2
     # Patch and execution brokers are wired per factory call (private).
-    assert len(mock_agent_class.call_args_list[0].kwargs["tools"]) == 17
-    assert len(mock_agent_class.call_args_list[1].kwargs["tools"]) == 17
+    assert len(mock_agent_class.call_args_list[0].kwargs["tools"]) == 20
+    assert len(mock_agent_class.call_args_list[1].kwargs["tools"]) == 20
