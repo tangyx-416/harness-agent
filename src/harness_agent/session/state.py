@@ -681,6 +681,89 @@ class SessionState:
                 reference=clean_plan_id,
             )
 
+    def record_git_push_prepared(
+        self, plan_id: str, remote_url: str, local_ref: str, remote_ref: str
+    ) -> SessionEvent:
+        """Record a Git push proposal as metadata only."""
+        clean_plan_id = self._normalize_reference(plan_id, "plan_id")
+        clean_url = _normalize_text(remote_url, field_name="remote_url", max_chars=100)
+        clean_local = _normalize_text(local_ref, field_name="local_ref", max_chars=100)
+        clean_remote = _normalize_text(remote_ref, field_name="remote_ref", max_chars=100)
+        summary = f"Git push prepared: {clean_local} → {clean_url}"
+        with self._lock:
+            return self._append_event_locked(
+                event_type="git_push_prepared",
+                summary=summary[:MAX_EVENT_SUMMARY_CHARS],
+                reference=clean_plan_id,
+            )
+
+    def record_git_push_approved(self, plan_id: str, remote_name: str, remote_branch: str) -> SessionEvent:
+        """Record a host-verified Git push approval as metadata only."""
+        clean_plan_id = self._normalize_reference(plan_id, "plan_id")
+        clean_remote = _normalize_text(remote_name, field_name="remote_name", max_chars=100)
+        clean_branch = _normalize_text(remote_branch, field_name="remote_branch", max_chars=100)
+        summary = f"Git push approved: {clean_remote}/{clean_branch}"
+        with self._lock:
+            return self._append_event_locked(
+                event_type="git_push_approved",
+                summary=summary[:MAX_EVENT_SUMMARY_CHARS],
+                reference=clean_plan_id,
+            )
+
+    def record_git_push_rejected(self, plan_id: str) -> SessionEvent:
+        """Record a host-verified Git push rejection as metadata only."""
+        clean_plan_id = self._normalize_reference(plan_id, "plan_id")
+        with self._lock:
+            return self._append_event_locked(
+                event_type="git_push_rejected",
+                summary="Git push rejected by the user; no network operation performed.",
+                reference=clean_plan_id,
+            )
+
+    def record_git_push_applied(self, plan_id: str, remote_name: str, remote_branch: str, head_oid: str) -> SessionEvent:
+        """Record a host-verified successful Git push as metadata only."""
+        clean_plan_id = self._normalize_reference(plan_id, "plan_id")
+        clean_remote = _normalize_text(remote_name, field_name="remote_name", max_chars=100)
+        clean_branch = _normalize_text(remote_branch, field_name="remote_branch", max_chars=100)
+        clean_oid = _normalize_text(head_oid[:7], field_name="head_oid", max_chars=20)
+        summary = f"Git push applied: {clean_remote}/{clean_branch} at {clean_oid}"
+        with self._lock:
+            return self._append_event_locked(
+                event_type="git_push_applied",
+                summary=summary[:MAX_EVENT_SUMMARY_CHARS],
+                reference=clean_plan_id,
+            )
+
+    def record_git_push_conflict(self, plan_id: str, reason: str | None = None) -> SessionEvent:
+        """Record a host-verified Git push conflict (no push performed) as metadata only."""
+        clean_plan_id = self._normalize_reference(plan_id, "plan_id")
+        if reason:
+            clean_reason = _normalize_text(reason, field_name="reason", max_chars=MAX_EVENT_SUMMARY_CHARS - 50)
+            summary = f"Git push conflicted: {clean_reason}"
+        else:
+            summary = "Git push conflicted; no remote push was performed."
+        with self._lock:
+            return self._append_event_locked(
+                event_type="git_push_conflict",
+                summary=summary[:MAX_EVENT_SUMMARY_CHARS],
+                reference=clean_plan_id,
+            )
+
+    def record_git_push_failed(self, plan_id: str, error: str | None = None) -> SessionEvent:
+        """Record a host-verified Git push failure as metadata only."""
+        clean_plan_id = self._normalize_reference(plan_id, "plan_id")
+        if error:
+            clean_error = _normalize_text(error, field_name="error", max_chars=MAX_EVENT_SUMMARY_CHARS - 50)
+            summary = f"Git push failed: {clean_error}"
+        else:
+            summary = "Git push failed; remote state may be unchanged."
+        with self._lock:
+            return self._append_event_locked(
+                event_type="git_push_failed",
+                summary=summary[:MAX_EVENT_SUMMARY_CHARS],
+                reference=clean_plan_id,
+            )
+
     def get_git_mutation_events(self) -> list[dict[str, Any]]:
         """Get all Git mutation events from the session.
 

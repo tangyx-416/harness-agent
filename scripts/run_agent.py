@@ -25,6 +25,11 @@ v0.7.0: one explicit GitMutationBroker is added. The agent may PREPARE Git
 stage (single-file) and commit (entire staged snapshot) proposals; the CLI
 shows the COMPLETE diff and the user approves or rejects each one. Only the
 host mutates the Git index or creates local commits. No push.
+
+v0.8.0: one explicit GitRemoteBroker is added. The agent may PREPARE remote
+Git push proposals; the CLI shows the COMPLETE outgoing commit list and diff,
+and the user approves or rejects each one. Only the host performs network
+operations and pushes to the remote. HTTPS only.
 """
 
 import sys
@@ -45,6 +50,8 @@ from harness_agent.git_mutation.service import (
     apply_approved_commit,
     apply_approved_stage,
 )
+from harness_agent.git_remote import GitRemoteBroker
+from harness_agent.git_remote.service import apply_push
 from harness_agent.patch import (
     PatchBroker,
     apply_approved,
@@ -65,10 +72,11 @@ _RESULT_ECHO_CHARS = 2000
 def print_banner():
     """Print welcome banner."""
     print("=" * 60)
-    print("Harness Agent v0.7")
+    print("Harness Agent v0.8")
     print("Session state: ephemeral (cleared when this CLI exits).")
     print("Source edits: proposed by the agent, applied only after you approve.")
     print("Git stage/commit: proposed by the agent, applied only after you approve.")
+    print("Git push: proposed by the agent, applied only after you approve.")
     print("Type 'exit' or 'quit' to stop, Ctrl+C to interrupt.")
     print("=" * 60)
     print()
@@ -371,6 +379,96 @@ def process_pending_git_mutations(
         print(f"Commit result: {result.status} -- {result.message}\n")
 
 
+def _request_push_approval(plan) -> bool:
+    """Show a push approval prompt and return True if user approves."""
+    print("-" * 70)
+    print("REMOTE GIT PUSH PROPOSAL")
+    print("-" * 70)
+    print(f"Plan ID: {plan.plan_id}")
+    print(f"Summary: {render_untrusted_terminal_text(plan.summary)}")
+    print()
+    print(f"Local branch:  {plan.local_branch}")
+    print(f"Local HEAD:    {plan.head_oid[:7]}")
+    print()
+    print(f"Remote:        {plan.remote_name}")
+    print(f"Remote URL:    {render_untrusted_terminal_text(plan.approved_remote_url)}")
+    print(f"Remote branch: {plan.remote_branch}")
+    print(f"Expected remote OID: {plan.expected_remote_oid[:7]}")
+    print()
+    print(f"Outgoing commits: {plan.commit_count}")
+    print()
+    for i, commit in enumerate(plan.outgoing_commits, 1):
+        subject = render_untrusted_terminal_text(commit.subject)
+        print(f"  {i}. {commit.short_oid} {subject}")
+    print()
+    print("COMPLETE OUTGOING DIFF:")
+    print("-" * 70)
+    safe_diff = render_untrusted_terminal_text(plan.diff)
+    print(safe_diff)
+    print("-" * 70)
+    print()
+    print("This operation will contact the remote Git server over HTTPS.")
+    print("This operation creates a remote repository mutation.")
+    print("This does NOT push tags.")
+    print("This does NOT force-push.")
+    print("This does NOT create a remote branch.")
+    print()
+    print("Push this exact local HEAD to this exact existing remote branch? [y/N]")
+
+    try:
+        answer = input("> ").strip().lower()
+        return answer in _APPROVAL_WORDS
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return False
+
+
+def process_pending_git_pushes(
+    git_remote_broker: GitRemoteBroker,
+    session_state: SessionState | None = None,
+    root=None,
+) -> None:
+    """Show pending Git push plans to the user and apply the approved ones.
+
+    This is the trusted host layer: the user approves/rejects each COMPLETE
+    push preview here (never the model). Approval authorizes exactly one remote
+    push attempt with preflight, lease, and post-verification.
+    """
+    if root is None:
+        root = find_repo_root()
+
+    for plan in git_remote_broker.pending_plans():
+        if not _request_push_approval(plan):
+            git_remote_broker.reject(plan.plan_id)
+            if session_state is not None:
+                session_state.record_git_push_rejected(plan.plan_id)
+            print("Push cancelled: ZERO network operation performed.\n")
+            continue
+
+        try:
+            if session_state is not None:
+                session_state.record_git_push_approved(
+                    plan.plan_id, plan.remote_name, plan.remote_branch
+                )
+            git_remote_broker.approve(plan.plan_id)
+            result = apply_push(plan, str(root), git_remote_broker)
+        except Exception as exc:
+            print(f"Push apply error: {exc}\n")
+            continue
+
+        if session_state is not None:
+            if result.state.value == "applied":
+                session_state.record_git_push_applied(
+                    plan.plan_id, result.remote_name, result.remote_branch, result.head_oid
+                )
+            elif result.state.value == "conflict":
+                session_state.record_git_push_conflict(plan.plan_id, result.message)
+            else:
+                session_state.record_git_push_failed(plan.plan_id, result.message)
+
+        print(f"Push result: {result.state.value} -- {result.message}\n")
+
+
 def main():
     """Run the interactive agent CLI."""
     # Load configuration and create agent
@@ -380,12 +478,14 @@ def main():
         execution_broker = ExecutionBroker()
         patch_broker = PatchBroker()
         git_mutation_broker = GitMutationBroker()
+        git_remote_broker = GitRemoteBroker()
         agent = create_agent(
             config,
             session_state=session_state,
             execution_broker=execution_broker,
             patch_broker=patch_broker,
             git_mutation_broker=git_mutation_broker,
+            git_remote_broker=git_remote_broker,
         )
     except ValueError as e:
         print(f"Configuration Error: {e}", file=sys.stderr)
@@ -440,6 +540,14 @@ def main():
                 # diff here; only the host mutates Git.
                 process_pending_git_mutations(
                     git_mutation_broker=git_mutation_broker,
+                    session_state=session_state,
+                )
+
+                # v0.8.0: the agent may also have prepared Git remote push plans.
+                # The user approves/rejects each COMPLETE outgoing commit list and
+                # diff here; only the host performs network operations and pushes.
+                process_pending_git_pushes(
+                    git_remote_broker=git_remote_broker,
                     session_state=session_state,
                 )
 

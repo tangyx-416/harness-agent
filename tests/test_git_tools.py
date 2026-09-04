@@ -107,7 +107,7 @@ def test_create_agent_registers_all_v04_tools():
         "git_branches",
     }
     assert expected <= tool_names
-    assert len(tools) == 20
+    assert len(tools) == 22
 
     # No Git mutation / generic git interface may be exposed.
     assert tool_names.isdisjoint(MUTATION_TOOL_NAMES)

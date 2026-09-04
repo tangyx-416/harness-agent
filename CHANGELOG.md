@@ -5,6 +5,54 @@ All notable changes to the Harness Project Agent will be documented in this file
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.0] - 2026-09-04
+
+### Added
+
+- **User-Approved Remote Git Push**: the agent can now propose pushing local commits to the configured remote repository, following the same security model: `LLM proposes -> Git Remote Policy validates -> User approves -> Host mutates`
+- Two new agent-visible tools: `prepare_git_push` (propose a push with zero network operations) and `get_git_push_result` (check plan status)
+- Immutable `GitPushPlan` model with complete diff preview, commit list, and destination URL
+- Git remote policy layer enforcing: HTTPS-only, current configured upstream only, existing remote branch only, fast-forward-only (no force-push authority), clean working tree, no merge commits in outgoing range, bounded commit count (max 20), bounded diff size (max 100KB)
+- Git remote service layer with three-phase protocol: preflight read (ls-remote), lease-bound push (--force-with-lease=<ref>:<oid>), post-push verification (ls-remote again)
+- Exact lease/CAS semantics preventing preflight-to-push race conditions
+- Post-push verification: remote OID must match approved local HEAD, mismatch → FAILED state
+- Destination mutation detection: URL/branch changes between approval and apply → CONFLICT state with zero network attempts
+- CLI approval UX showing destination URL, outgoing commits, and complete diff
+- Session state now records 4 Git remote events (prepare_proposed, prepare_approved, push_applied, push_conflict/failed)
+- `GitRemoteBroker` isolated per agent (closure-bound tools, no cross-session visibility), bounded at 200 plans per broker
+- Comprehensive test coverage: 101 Git remote tests added (broker, policy, service, tools, integration, isolation, race conditions), bringing total to 915 tests (906 passing)
+- Smoke test script (`scripts/smoke_git_remote.py`) with 6 end-to-end checks validating broker isolation, exactly-once semantics, policy enforcement, and tool surface
+
+### Security
+
+- **URL redirection protection**: `url.*.insteadOf`, `url.*.pushInsteadOf`, and `remote.*.pushurl` config rules can silently redirect an approved push to an attacker-controlled host. v0.8.0 compares the raw configured URL against the effective push URL and rejects any difference at prepare time, ensuring APPROVED DESTINATION == ACTUAL PUSH DESTINATION
+- Zero-network prepare: `validate_and_prepare_push()` performs no DNS/TCP/HTTP operations, no credential helper execution
+- Credential boundary: No credentials in GitPushPlan, GitPushResult, SessionState, CLI preview, or logs
+- Hook/signer suppression: pre-push hooks and external signers not executed via `-c core.hooksPath=/dev/null -c gpg.program=false`
+- Tag suppression: `--tags` and `--follow-tags` never used, `-c push.followTags=false` override present
+- Submodule recursion suppression: `-c push.recurseSubmodules=no` override present even when config enables it
+- Exactly-once network write: Single push attempt, no automatic retry on any failure class
+- No force-push authority: `--force-with-lease=<ref>:<oid>` is a CAS mechanism, not force-push authority; behind/diverged history denied at prepare time
+
+### Limitations (By Design)
+
+- HTTPS only - No SSH, file://, git@, or other schemes
+- Current configured upstream only - No arbitrary remote/branch selection
+- Existing remote branch only - No branch creation
+- Fast-forward only - No force-push authority
+- No tags - Branch-only push
+- No remote deletion - No ref deletion
+- No fetch/pull - Push-only capability
+- No automatic retry - Single network write attempt
+- Local commit ≠ remote success - Must verify with get_git_push_result
+
+### Changed
+
+- Agent tool count increased from 20 to 22 (added 2 Git remote tools)
+- System prompt updated to v0.8.0, role now "User-Approved Remote Git Push"
+- CLI banner updated to v0.8.0 with Git remote push disclosure
+- Version bumped to 0.8.0 in `pyproject.toml` and `__init__.py`
+
 ## [0.7.0] - 2026-09-04
 
 ### Added

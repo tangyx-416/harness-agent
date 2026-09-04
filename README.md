@@ -1,12 +1,12 @@
 # Harness Project Agent
 
-**Version: 0.7.0** | **Status: User-Approved Git Stage & Commit**
+**Version: 0.8.0** | **Status: User-Approved Remote Git Push**
 
-A Single-Agent MVP built on the Strands Agents SDK, designed to analyze code repositories, explain local Git state (read-only), request whitelisted command execution under explicit human approval, propose precise user-approved single-file source edits, propose user-approved Git stage and commit operations, and track structured progress for multi-step tasks within one CLI process.
+A Single-Agent MVP built on the Strands Agents SDK, designed to analyze code repositories, explain local Git state (read-only), request whitelisted command execution under explicit human approval, propose precise user-approved single-file source edits, propose user-approved Git stage and commit operations, propose user-approved remote Git push operations, and track structured progress for multi-step tasks within one CLI process.
 
 ## Overview
 
-This project implements a conversational AI agent that can safely browse, read, search, and understand a code repository. v0.3.0 added requests for controlled execution, v0.4.0 added local read-only Git awareness, v0.5.0 adds bounded, structured task progress in ephemeral memory, v0.6.0 adds User-Approved Source Editing, and v0.7.0 adds User-Approved Git Stage & Commit. The core security model remains:
+This project implements a conversational AI agent that can safely browse, read, search, and understand a code repository. v0.3.0 added requests for controlled execution, v0.4.0 added local read-only Git awareness, v0.5.0 adds bounded, structured task progress in ephemeral memory, v0.6.0 adds User-Approved Source Editing, v0.7.0 adds User-Approved Git Stage & Commit, and v0.8.0 adds User-Approved Remote Git Push. The core security model remains:
 
 > LLM proposes. Policy validates. User approves. Host executes.
 
@@ -18,10 +18,14 @@ Git Mutation uses the same boundary:
 
 > LLM proposes. Git Policy validates. User approves. Host mutates.
 
+Remote Push uses the same boundary:
+
+> LLM proposes. Git Remote Policy validates. User approves. Host pushes.
+
 Git Awareness is NOT Git Authority:
 
 > Repository read: YES. Git read: YES. Controlled test run: YES (with approval).
-> Source write: YES (with approval). Git stage/commit: YES (with approval). Git push/tag: NO. Git network: NO.
+> Source write: YES (with approval). Git stage/commit: YES (with approval). Git push: YES (with approval, HTTPS-only, fast-forward-only). Git force-push: NO. Git fetch/pull: NO. Git network (read): NO.
 
 Task State is NOT Permission:
 
@@ -34,6 +38,10 @@ Patch Broker is NOT Write Authority:
 Git Mutation Broker is NOT Git Authority:
 
 > `prepare_git_stage` and `prepare_git_commit` only propose immutable plans; only the host mutates Git after user approval.
+
+Git Remote Broker is NOT Push Authority:
+
+> `prepare_git_push` only proposes immutable plans; only the host performs network write after user approval. HTTPS-only, fast-forward-only, no force-push authority.
 
 ## Architecture
 
@@ -94,7 +102,17 @@ Strands Agent
   Host Git Service (exact blob/commit, no hooks/signing/network)
       ↓
   Git Mutation Result
-  PatchResult
+ └── prepare_git_push
+      ↓
+  Git Remote Policy (HTTPS-only, upstream validation, fast-forward-only)
+      ↓
+  Pending GitPushPlan (COMPLETE diff, commit list, destination URL)
+      ↓
+  User Approval (CLI prompt)           ← trust boundary
+      ↓
+  Host Git Remote Service (preflight, exact lease/CAS, post-verification)
+      ↓
+  Git Push Result
 ```
 
 The agent uses a simple but extensible architecture:
@@ -472,7 +490,7 @@ Run with coverage:
 pytest --cov=harness_agent
 ```
 
-## Current Features (v0.6.0)
+## Current Features (v0.8.0)
 
 - ✅ **Single Strands Agent**: One conversational agent with clear responsibilities
 - ✅ **OpenAI-Compatible Models**: Works with OpenAI, local vLLM, and other compatible endpoints
@@ -484,26 +502,32 @@ pytest --cov=harness_agent
 - ✅ **Read-Only Git Awareness**: status, diff, log, branches with hardened fixed argv (`git_status` / `git_diff` / `git_log` / `git_branches`)
 - ✅ **User-Approved Execution**: `prepare_command` requests, policy validates, user approves, host executes
 - ✅ **User-Approved Source Editing**: `prepare_patch` proposes immutable single-file edits/creates; the host applies only after explicit user approval
+- ✅ **User-Approved Git Stage & Commit**: `prepare_git_stage` / `prepare_git_commit` propose immutable plans; the host mutates Git only after explicit user approval
+- ✅ **User-Approved Remote Git Push**: `prepare_git_push` proposes immutable push plans with COMPLETE diff; the host performs network write only after explicit user approval (HTTPS-only, fast-forward-only, no force-push authority)
 - ✅ **Structured Task Planning**: Four state-only tools track multi-step progress without adding authority
 - ✅ **Ephemeral Session State**: Per-process isolation, immutable models, `RLock`, bounded tasks/steps/events
 - ✅ **Host-Verified Session Events**: Approval/rejection/completion metadata without raw execution output or code content
 - ✅ **Execution Policy**: Strict allowlist, per-flag validation, shell-syntax rejection
 - ✅ **Patch Policy**: Exact-match edits, overlapping detection, path/secret/ignored/binary guards, size limits, COMPLETE diff
+- ✅ **Git Mutation Policy**: Path safety, text-only, merge/submodule/filter/hooks/signing suppression
+- ✅ **Git Remote Policy**: HTTPS-only, upstream validation, fast-forward-only, lease/CAS race protection, URL redirection rejection, credential boundary, post-push verification
 - ✅ **Bounded Streaming Capture**: stdout/stderr drained while the child runs; only the first 64 KB per stream is retained (memory-bounded)
 - ✅ **Read-Only Repository Boundary**: Path confinement, sensitive file blocking, binary detection, output limits
-- ✅ **CLI Interface**: Interactive terminal-based conversation with execution and source-edit approval prompts
+- ✅ **CLI Interface**: Interactive terminal-based conversation with execution, source-edit, Git mutation, and push approval prompts
 - ✅ **Configuration Management**: Environment-based config with validation
-- ✅ **Deterministic Tests**: 568 passing tests with mocked/fake dependencies
+- ✅ **Deterministic Tests**: 906 passing tests with mocked/fake dependencies
 
 ### Verification Status
 
-- **Tests**: 568/568 deterministic/mock tests passing (v0.4.0 baseline: 344/344, v0.5.0: 454/454)
+- **Tests**: 906/915 deterministic/mock tests passing (v0.4.0 baseline: 344/344, v0.5.0: 454/454, v0.6.0: 568/568, v0.7.0: 889/897)
 - **SDK Integration**: Verified locally with Strands Agents 1.53.0
 - **Execution Smoke**: `scripts/smoke_execution.py` - 35/35 checks passing (host-level, no API key needed)
 - **Repository Smoke**: `scripts/smoke_repo_tools.py` passing (v0.2 regression)
 - **Git Awareness Smoke**: `scripts/smoke_git_awareness.py` - 21/21 checks passing on the real repository (read-only before/after proof)
 - **Session Planning Smoke**: `scripts/smoke_session_planning.py` - 13/13 checks passing (no LLM or API key) including broker isolation and completed-task terminal checks
 - **Source Editing Smoke**: `scripts/smoke_source_editing.py` - 24/24 checks passing (host-level, no API key) across propose/approve/reject/conflict/denials
+- **Git Mutation Smoke**: `scripts/smoke_git_mutation.py` - 6/6 checks passing (v0.7.0 regression)
+- **Git Remote Smoke**: `scripts/smoke_git_remote.py` - 6/6 checks passing (broker isolation, exactly-once, policy enforcement)
 - **Real LLM Execution**: Requires a valid OpenAI API key
 - **Live API Smoke Test**: Has not yet been performed in this environment
 
@@ -520,8 +544,12 @@ This is a **stable development baseline**, not a production-ready system.
 - **Output limits**: Depth/entry/line/result caps with `truncated` flags; Git output bounded at 128 KB / 32 KB
 - **Constrained execution**: allowlist + approval + argv-based subprocess + timeout + bounded capture + secret scrubbing
 - **User-approved source editing**: no direct write tools; edits go through `prepare_patch`, host approval and atomic host apply only
+- **User-approved Git mutation**: no direct Git mutation tools; stage/commit go through brokers, host approval and exact Git operations only
+- **User-approved remote push**: no direct push tools; push goes through broker, HTTPS-only policy validation, host approval, preflight, exact lease/CAS, and post-verification only
 - **No source mutation without approval**: no direct write/edit/delete tools, no `ruff --fix`, no autonomous patch apply
-- **No Git mutation**: no add/commit/push/checkout/... tools exist in any layer
+- **No Git mutation without approval**: no direct add/commit/reset/rebase tools, no hook execution, no autonomous Git operations
+- **No force-push authority**: Git remote push is fast-forward-only with exact lease/CAS; no `--force` or bare `-f` flags
+- **No credential exposure**: prepare phase never executes credential helpers; no credentials in session state, logs, or model-visible output
 
 ## Project Structure
 
