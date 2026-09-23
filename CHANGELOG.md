@@ -5,6 +5,54 @@ All notable changes to the Harness Project Agent will be documented in this file
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.0] - 2026-09-23
+
+### Added
+
+- **User-Approved Remote Git Fetch**: the agent can now propose fetching remote commits to refresh local tracking refs, following the same security model: `LLM proposes -> Git Fetch Policy validates -> User approves -> Host fetches`
+- Two new agent-visible tools: `prepare_git_fetch` (propose a fetch with zero network operations) and `get_git_fetch_result` (check plan status)
+- Immutable `GitFetchPlan` model with remote URL, remote branch, tracking ref, and current tracking OID
+- Git fetch policy layer enforcing: HTTPS-only remotes, existing configured remote only, existing remote branch only, dangerous config rejection (url.*.insteadOf, repository-local credential.helper, http.extraHeader, http.proxy)
+- Git fetch service layer with transport isolation boundary: fetch to temporary Harness ref (`refs/harness-agent/fetch/<plan-id>`), validate fetched commit, fast-forward tracking ref via CAS update-ref, cleanup temp ref
+- Workspace preservation invariants: HEAD, local branches, index, working tree, FETCH_HEAD, tags, and other tracking refs remain unchanged
+- History rewrite detection: if fetched commit is not a descendant of current tracking ref → CONFLICT state, no tracking ref update
+- Tracking ref CAS semantics: concurrent tracking ref changes detected via compare-and-swap update-ref, prevents lost updates
+- CLI approval UX showing remote URL, remote branch, tracking ref, and current/observed OIDs
+- Session state now records 4 Git fetch events (fetch_prepare_proposed, fetch_prepare_approved, fetch_applied, fetch_conflict/failed)
+- `GitFetchBroker` isolated per agent (closure-bound tools, no cross-session visibility), bounded at 200 plans per broker
+- Comprehensive test coverage: 45 Git fetch tests added (models, broker, policy, service, conflict scenarios, workspace preservation), bringing total to 960 tests
+- Smoke test script (`scripts/smoke_git_fetch.py`) validating broker isolation, exactly-once semantics, policy enforcement, and tool surface
+
+### Security
+
+- **URL redirection protection**: `url.*.insteadOf` config can silently redirect an approved fetch to an attacker-controlled host. v0.9.0 compares raw configured URL against effective fetch URL and rejects any difference at prepare time
+- **Repository-local credential.helper rejection**: repository-controlled shell credential helpers could gain arbitrary execution authority. v0.9.0 checks credential.helper scope and rejects repository-local shell helpers
+- **Repository-local http.extraHeader rejection**: repository-controlled headers could inject Authorization or other sensitive headers. v0.9.0 rejects repository-local http.extraHeader configuration
+- **Repository-local proxy rejection**: repository-controlled http.proxy and remote.*.proxy can alter network routing. v0.9.0 rejects repository-local proxy settings
+- **Apply-time revalidation**: all config security checks run both at prepare time and immediately before network fetch, preventing injection attacks between approval and apply
+- Zero-network prepare: `validate_and_prepare_fetch()` performs no DNS/TCP/HTTP operations, no credential helper execution
+- Credential boundary: No credentials in GitFetchPlan, GitFetchResult, SessionState, CLI preview, or logs
+- Tag suppression: `--no-tags` prevents tag fetching even when remote advertises tags
+- Submodule suppression: `--no-recurse-submodules`, `-c fetch.recurseSubmodules=false`, `-c submodule.recurse=false` prevent submodule updates
+- FETCH_HEAD preservation: `--no-write-fetch-head` prevents modifying FETCH_HEAD
+- Exact ref isolation: Only the approved tracking ref may be updated, all other refs preserved
+- Exactly-once network read: Single fetch attempt, no automatic retry on any failure class
+
+### Limitations (By Design)
+
+- HTTPS only - No SSH, file://, git@, or other schemes
+- Existing configured remote only - No arbitrary remote URL
+- Existing remote branch only - No arbitrary refspec
+- Fast-forward only - No force-fetch, history rewrites rejected
+- No tags - Tracking ref only
+- No submodules - Submodule recursion suppressed
+- No pull/merge/rebase - Fetch updates tracking refs only, not local branches
+- No automatic retry - Single network read attempt
+- Trusted user/global config only - Repository-local dangerous config rejected
+- Does not control: OS-level proxy/DNS, trusted user credential helpers, server-side behavior
+
+### Changed
+
 ## [0.8.0] - 2026-09-04
 
 ### Added

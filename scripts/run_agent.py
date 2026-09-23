@@ -30,6 +30,11 @@ v0.8.0: one explicit GitRemoteBroker is added. The agent may PREPARE remote
 Git push proposals; the CLI shows the COMPLETE outgoing commit list and diff,
 and the user approves or rejects each one. Only the host performs network
 operations and pushes to the remote. HTTPS only.
+
+v0.9.0: one explicit GitFetchBroker is added. The agent may PREPARE remote
+Git fetch proposals; the CLI shows the COMPLETE fetch scope (remote URL, branch,
+tracking ref) and the user approves or rejects each one. Only the host performs
+network operations and fetches from the remote. HTTPS only.
 """
 
 import sys
@@ -50,6 +55,8 @@ from harness_agent.git_mutation.service import (
     apply_approved_commit,
     apply_approved_stage,
 )
+from harness_agent.git_fetch import GitFetchBroker
+from harness_agent.git_fetch.service import apply_fetch
 from harness_agent.git_remote import GitRemoteBroker
 from harness_agent.git_remote.service import apply_push
 from harness_agent.patch import (
@@ -72,11 +79,12 @@ _RESULT_ECHO_CHARS = 2000
 def print_banner():
     """Print welcome banner."""
     print("=" * 60)
-    print("Harness Agent v0.8")
+    print("Harness Agent v0.9")
     print("Session state: ephemeral (cleared when this CLI exits).")
     print("Source edits: proposed by the agent, applied only after you approve.")
     print("Git stage/commit: proposed by the agent, applied only after you approve.")
     print("Git push: proposed by the agent, applied only after you approve.")
+    print("Git fetch: proposed by the agent, applied only after you approve.")
     print("Type 'exit' or 'quit' to stop, Ctrl+C to interrupt.")
     print("=" * 60)
     print()
@@ -469,6 +477,117 @@ def process_pending_git_pushes(
         print(f"Push result: {result.state.value} -- {result.message}\n")
 
 
+def _request_fetch_approval(plan) -> bool:
+    """Show a fetch approval prompt and return True if user approves."""
+    print("-" * 70)
+    print("REMOTE GIT FETCH PROPOSAL")
+    print("-" * 70)
+    print(f"Plan ID: {plan.plan_id}")
+    print(f"Summary: {render_untrusted_terminal_text(plan.summary)}")
+    print()
+    print(f"Local branch:  {plan.local_branch}")
+    print(f"Local HEAD:    {plan.local_head_oid[:7]}")
+    print()
+    print(f"Remote:        {plan.remote_name}")
+    print(f"Remote URL:    {render_untrusted_terminal_text(plan.approved_remote_url)}")
+    print(f"Remote branch: {plan.remote_branch}")
+    print()
+    print(f"Tracking ref:         {plan.tracking_ref}")
+    print(f"Current tracking OID: {plan.expected_tracking_oid[:7]}")
+    print()
+    print("-" * 70)
+    print()
+    print("This operation will:")
+    print("  1. Contact the remote Git server over HTTPS (network READ)")
+    print("  2. Transfer Git objects into the local repository")
+    print("  3. Update ONLY the tracking ref above (if remote has new commits)")
+    print()
+    print("This operation will NOT:")
+    print("  - Modify your working tree")
+    print("  - Modify the Git index")
+    print("  - Move HEAD or any local branch")
+    print("  - Fetch or modify tags")
+    print("  - Recurse into submodules")
+    print("  - Merge, rebase, or pull")
+    print("  - Modify the remote repository")
+    print()
+    print("Fetch from this remote and update this tracking ref? [y/N]")
+
+    try:
+        answer = input("> ").strip().lower()
+        return answer in _APPROVAL_WORDS
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return False
+
+
+def process_pending_git_fetches(
+    git_fetch_broker: GitFetchBroker,
+    session_state: SessionState | None = None,
+    root=None,
+) -> None:
+    """Show pending Git fetch plans to the user and apply the approved ones.
+
+    This is the trusted host layer: the user approves/rejects each COMPLETE
+    fetch preview here (never the model). Approval authorizes exactly one remote
+    fetch attempt with revalidation and atomic tracking ref update.
+    """
+    if root is None:
+        root = find_repo_root()
+
+    for plan in git_fetch_broker.pending_plans():
+        if not _request_fetch_approval(plan):
+            git_fetch_broker.reject(plan.plan_id)
+            if session_state is not None:
+                session_state.add_event(
+                    kind="git_fetch_rejected",
+                    data={"plan_id": plan.plan_id},
+                )
+            print("Fetch cancelled: ZERO network operation performed.\n")
+            continue
+
+        try:
+            if session_state is not None:
+                session_state.add_event(
+                    kind="git_fetch_approved",
+                    data={
+                        "plan_id": plan.plan_id,
+                        "remote_name": plan.remote_name,
+                        "remote_branch": plan.remote_branch,
+                    },
+                )
+            git_fetch_broker.approve(plan.plan_id)
+            result = apply_fetch(plan, str(root), git_fetch_broker)
+        except Exception as exc:
+            print(f"Fetch apply error: {exc}\n")
+            continue
+
+        if session_state is not None:
+            if result.state.value == "applied":
+                session_state.add_event(
+                    kind="git_fetch_applied",
+                    data={
+                        "plan_id": plan.plan_id,
+                        "remote_name": result.remote_name,
+                        "remote_branch": result.remote_branch,
+                        "tracking_ref": result.tracking_ref,
+                        "changed": result.changed,
+                    },
+                )
+            elif result.state.value == "conflict":
+                session_state.add_event(
+                    kind="git_fetch_conflict",
+                    data={"plan_id": plan.plan_id, "message": result.message},
+                )
+            else:
+                session_state.add_event(
+                    kind="git_fetch_failed",
+                    data={"plan_id": plan.plan_id, "message": result.message},
+                )
+
+        print(f"Fetch result: {result.state.value} -- {result.message}\n")
+
+
 def main():
     """Run the interactive agent CLI."""
     # Load configuration and create agent
@@ -479,6 +598,7 @@ def main():
         patch_broker = PatchBroker()
         git_mutation_broker = GitMutationBroker()
         git_remote_broker = GitRemoteBroker()
+        git_fetch_broker = GitFetchBroker()
         agent = create_agent(
             config,
             session_state=session_state,
@@ -486,6 +606,7 @@ def main():
             patch_broker=patch_broker,
             git_mutation_broker=git_mutation_broker,
             git_remote_broker=git_remote_broker,
+            git_fetch_broker=git_fetch_broker,
         )
     except ValueError as e:
         print(f"Configuration Error: {e}", file=sys.stderr)
@@ -548,6 +669,14 @@ def main():
                 # diff here; only the host performs network operations and pushes.
                 process_pending_git_pushes(
                     git_remote_broker=git_remote_broker,
+                    session_state=session_state,
+                )
+
+                # v0.9.0: the agent may also have prepared Git remote fetch plans.
+                # The user approves/rejects each COMPLETE fetch scope here; only
+                # the host performs network operations and fetches.
+                process_pending_git_fetches(
+                    git_fetch_broker=git_fetch_broker,
                     session_state=session_state,
                 )
 

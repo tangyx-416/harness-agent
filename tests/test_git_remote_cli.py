@@ -135,7 +135,7 @@ def test_agent_exposes_exactly_22_tools():
     tools = mock_agent.call_args.kwargs["tools"]
     tool_names = [getattr(t, "tool_name", getattr(t, "__name__", "")) for t in tools]
 
-    assert len(tools) == 22
+    assert len(tools) == 24
     assert "prepare_git_push" in tool_names
     assert "get_git_push_result" in tool_names
 

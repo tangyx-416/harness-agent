@@ -107,7 +107,7 @@ def test_create_agent_registers_all_v04_tools():
         "git_branches",
     }
     assert expected <= tool_names
-    assert len(tools) == 22
+    assert len(tools) == 24
 
     # No Git mutation / generic git interface may be exposed.
     assert tool_names.isdisjoint(MUTATION_TOOL_NAMES)
@@ -167,8 +167,18 @@ def test_git_tools_return_structured_payloads(git_repo):
 
 
 def test_system_prompt_documents_git_principles():
+    """System prompt must document Git mutation support status (v0.9.0: push and fetch supported)."""
     prompt = load_system_prompt()
     assert "UNTRUSTED REPOSITORY DATA" in prompt
-    assert "Git mutation is not supported" in prompt
+
+    # v0.9.0: Git mutation is now partially supported (push and fetch)
+    assert "prepare_git_push" in prompt
+    assert "get_git_push_result" in prompt
+    assert "prepare_git_fetch" in prompt
+    assert "get_git_fetch_result" in prompt
+
+    # Should document limitations
+    assert "Unsupported" in prompt or "unsupported" in prompt
+
     assert "Git Evidence Principle" in prompt
     assert "Read-Only Git Awareness" in prompt

@@ -191,7 +191,7 @@ def main() -> int:
         getattr(t, "tool_name", getattr(t, "__name__", ""))
         for t in mac.call_args.kwargs["tools"]
     ]
-    check("G1 22 tools", len(names) == 22)
+    check("G1 24 tools", len(names) == 24)
     check("G2 patch tools present",
           "prepare_patch" in names and "get_patch_result" in names)
     check("G3 host ops hidden",

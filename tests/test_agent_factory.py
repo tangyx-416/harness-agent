@@ -239,8 +239,8 @@ def test_create_agent_registers_exactly_twenty_v07_tools():
         getattr(item, "tool_name", getattr(item, "__name__", ""))
         for item in tools
     ]
-    assert len(tools) == 22
-    assert len(set(tool_names)) == 22
+    assert len(tools) == 24
+    assert len(set(tool_names)) == 24
     assert set(tool_names) == {
         "inspect_project",
         "list_directory",
@@ -264,6 +264,8 @@ def test_create_agent_registers_exactly_twenty_v07_tools():
         "get_git_mutation_result",
         "prepare_git_push",
         "get_git_push_result",
+        "prepare_git_fetch",
+        "get_git_fetch_result",
     }
     assert not (
         {

@@ -209,7 +209,7 @@ def test_agent_has_git_mutation_tools():
         assert "prepare_git_stage" in tool_names
         assert "prepare_git_commit" in tool_names
         assert "get_git_mutation_result" in tool_names
-        assert len(tools) == 22  # v0.8.0: 17 + 3 (v0.7) + 2 (v0.8)
+        assert len(tools) == 24  # v0.9.0: 17 + 3 (v0.7) + 2 (v0.8) + 2 (v0.9)
 
     print("✓")
 

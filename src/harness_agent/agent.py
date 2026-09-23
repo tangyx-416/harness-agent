@@ -8,11 +8,13 @@ from strands.models.openai import OpenAIModel
 
 from .config import AgentConfig, get_prompts_dir
 from .execution import ExecutionBroker
+from .git_fetch import GitFetchBroker
 from .git_mutation import GitMutationBroker
 from .git_remote import GitRemoteBroker
 from .patch import PatchBroker
 from .session import SessionState
 from .tools.execution_tools import make_execution_tools
+from .tools.git_fetch_tools import make_git_fetch_tools
 from .tools.git_mutation_tools import make_git_mutation_tools
 from .tools.git_remote_tools import make_git_remote_tools
 from .tools.git_tools import (
@@ -52,6 +54,7 @@ def create_agent(
     patch_broker: PatchBroker | None = None,
     git_mutation_broker: GitMutationBroker | None = None,
     git_remote_broker: GitRemoteBroker | None = None,
+    git_fetch_broker: GitFetchBroker | None = None,
 ) -> Agent:
     """Create and configure a Harness Agent.
 
@@ -65,7 +68,8 @@ def create_agent(
     7. Binds patch-request tools to one isolated in-memory broker
     8. Binds Git mutation-request tools to one isolated in-memory broker
     9. Binds Git remote push-request tools to one isolated in-memory broker
-    10. Creates and returns the Agent instance
+    10. Binds Git remote fetch-request tools to one isolated in-memory broker
+    11. Creates and returns the Agent instance
 
     Args:
         config: Optional configuration. If not provided, loads from environment.
@@ -78,6 +82,8 @@ def create_agent(
         git_mutation_broker: Optional explicit Git mutation broker. A fresh
             private broker is created when omitted.
         git_remote_broker: Optional explicit Git remote broker. A fresh private
+            broker is created when omitted.
+        git_fetch_broker: Optional explicit Git fetch broker. A fresh private
             broker is created when omitted.
 
     Returns:
@@ -143,6 +149,14 @@ def create_agent(
         Path.cwd(), bound_git_remote_broker
     )
 
+    # v0.9.0: every factory call owns an isolated Git fetch broker unless the
+    # host explicitly supplies one. It holds only pending/approved Git remote fetch
+    # proposals for THIS agent; remote fetches are applied only by the host layer.
+    bound_git_fetch_broker = git_fetch_broker or GitFetchBroker()
+    git_fetch, git_fetch_result = make_git_fetch_tools(
+        Path.cwd(), bound_git_fetch_broker, bound_session_state
+    )
+
     # Create tool - Strands @tool decorator makes functions into tools.
     # The public model-facing name is 'inspect_project' (matches docs and
     # the other repository tools); the Python wrapper keeps a distinct name.
@@ -183,6 +197,9 @@ def create_agent(
     # v0.8.0: two closure-bound Git remote push tools validate + register pending
     # remote push proposals in the explicit Git remote broker. They perform zero
     # network operations during prepare.
+    # v0.9.0: two closure-bound Git remote fetch tools validate + register pending
+    # remote fetch proposals in the explicit Git fetch broker. They perform zero
+    # network operations during prepare.
     agent = Agent(
         model=model,
         system_prompt=system_prompt,
@@ -206,6 +223,8 @@ def create_agent(
             git_mutation_result,
             git_push,
             git_push_result,
+            git_fetch,
+            git_fetch_result,
         ],
         name="HarnessAgent",
         description="A project repository assistant agent",

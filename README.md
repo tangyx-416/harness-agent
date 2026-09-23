@@ -1,12 +1,12 @@
 # Harness Project Agent
 
-**Version: 0.8.0** | **Status: User-Approved Remote Git Push**
+**Version: 0.9.0** | **Status: User-Approved Remote Git Fetch**
 
-A Single-Agent MVP built on the Strands Agents SDK, designed to analyze code repositories, explain local Git state (read-only), request whitelisted command execution under explicit human approval, propose precise user-approved single-file source edits, propose user-approved Git stage and commit operations, propose user-approved remote Git push operations, and track structured progress for multi-step tasks within one CLI process.
+A Single-Agent MVP built on the Strands Agents SDK, designed to analyze code repositories, explain local Git state (read-only), request whitelisted command execution under explicit human approval, propose precise user-approved single-file source edits, propose user-approved Git stage and commit operations, propose user-approved remote Git push operations, propose user-approved remote Git fetch operations, and track structured progress for multi-step tasks within one CLI process.
 
 ## Overview
 
-This project implements a conversational AI agent that can safely browse, read, search, and understand a code repository. v0.3.0 added requests for controlled execution, v0.4.0 added local read-only Git awareness, v0.5.0 adds bounded, structured task progress in ephemeral memory, v0.6.0 adds User-Approved Source Editing, v0.7.0 adds User-Approved Git Stage & Commit, and v0.8.0 adds User-Approved Remote Git Push. The core security model remains:
+This project implements a conversational AI agent that can safely browse, read, search, and understand a code repository. v0.3.0 added requests for controlled execution, v0.4.0 added local read-only Git awareness, v0.5.0 adds bounded, structured task progress in ephemeral memory, v0.6.0 adds User-Approved Source Editing, v0.7.0 adds User-Approved Git Stage & Commit, v0.8.0 adds User-Approved Remote Git Push, and v0.9.0 adds User-Approved Remote Git Fetch. The core security model remains:
 
 > LLM proposes. Policy validates. User approves. Host executes.
 
@@ -22,10 +22,14 @@ Remote Push uses the same boundary:
 
 > LLM proposes. Git Remote Policy validates. User approves. Host pushes.
 
+Remote Fetch uses the same boundary:
+
+> LLM proposes. Git Fetch Policy validates. User approves. Host fetches.
+
 Git Awareness is NOT Git Authority:
 
 > Repository read: YES. Git read: YES. Controlled test run: YES (with approval).
-> Source write: YES (with approval). Git stage/commit: YES (with approval). Git push: YES (with approval, HTTPS-only, fast-forward-only). Git force-push: NO. Git fetch/pull: NO. Git network (read): NO.
+> Source write: YES (with approval). Git stage/commit: YES (with approval). Git push: YES (with approval, HTTPS-only, fast-forward-only). Git fetch: YES (with approval, HTTPS-only, fast-forward-only). Git force-push: NO. Git pull/merge/rebase: NO.
 
 Task State is NOT Permission:
 
@@ -42,6 +46,10 @@ Git Mutation Broker is NOT Git Authority:
 Git Remote Broker is NOT Push Authority:
 
 > `prepare_git_push` only proposes immutable plans; only the host performs network write after user approval. HTTPS-only, fast-forward-only, no force-push authority.
+
+Git Fetch Broker is NOT Fetch Authority:
+
+> `prepare_git_fetch` only proposes immutable plans; only the host performs network read after user approval. HTTPS-only, fast-forward-only tracking ref updates, no working-tree/index/local-branch mutation.
 
 ## Architecture
 
@@ -113,6 +121,17 @@ Strands Agent
   Host Git Remote Service (preflight, exact lease/CAS, post-verification)
       ↓
   Git Push Result
+ └── prepare_git_fetch
+      ↓
+  Git Fetch Policy (HTTPS-only, upstream validation, zero-network prepare)
+      ↓
+  Pending GitFetchPlan (remote URL, branch, tracking ref)
+      ↓
+  User Approval (CLI prompt)           ← trust boundary
+      ↓
+  Host Git Fetch Service (revalidation, isolated temp ref, atomic CAS update)
+      ↓
+  Git Fetch Result
 ```
 
 The agent uses a simple but extensible architecture:
@@ -122,6 +141,9 @@ The agent uses a simple but extensible architecture:
 - **Git Awareness Tools**: Read-only Git introspection with fixed hardened argv; the model provides semantic parameters (scope/path/limit), never a Git subcommand
 - **Execution Layer**: The model can only *prepare* execution plans (`prepare_command`); validation, approval and subprocess execution live in the trusted host layer (`harness_agent.execution` + CLI). Execution is never automatically approved.
 - **Patch Layer**: The model can only *propose* immutable single-file edits/creates (`prepare_patch`); validation, approval and file application live in the trusted host layer (`harness_agent.patch` + CLI). The Agent has no direct file-write tool.
+- **Git Mutation Layer**: The model can only *propose* immutable stage/commit plans (`prepare_git_stage`, `prepare_git_commit`); validation, approval and Git index/commit mutation live in the trusted host layer.
+- **Git Remote Push Layer**: The model can only *propose* immutable push plans (`prepare_git_push`); validation, approval and network write live in the trusted host layer. HTTPS-only, fast-forward-only.
+- **Git Remote Fetch Layer**: The model can only *propose* immutable fetch plans (`prepare_git_fetch`); validation, approval and network read live in the trusted host layer. HTTPS-only, fast-forward-only tracking ref updates, no working-tree/index/local-branch mutation.
 - **Session State**: One explicit, thread-safe `SessionState` per CLI process stores immutable task/step snapshots and bounded metadata events. It is separate from Strands conversation history and never persists.
 - **System Prompt**: Defines the agent's behavior, tool strategy, Git evidence rules, execution state semantics, source-edit semantics, and anti-hallucination rules
 
